@@ -2,24 +2,40 @@
 
 ## Project purpose
 
-LedgerDrop is a business-facing AI document-processing application intended to reduce manual data entry. Users will upload business documents, the application will extract structured data, normalize and validate it, and eventually either accept the result or send it for human review.
+LedgerDrop is a business-facing AI document-processing application intended to
+reduce manual data entry. Users upload business documents; the application
+extracts structured data, normalizes and validates it, and eventually either
+accepts the result or sends it for human review.
 
-The first supported use case is processing English-language invoices supplied as PDF files. The architecture should remain extensible enough to support other document types later, but no abstractions for hypothetical document types should be implemented unless they directly help the current invoice MVP.
+The first supported use case is English-language invoices supplied as PDF files.
+Keep the architecture extensible, but do not build abstractions for hypothetical
+document types unless they directly help the invoice MVP.
 
 ## Current project state
 
-The Stage 2 backend is complete: FastAPI application setup, environment-based
-configuration, async PostgreSQL connectivity, SQLAlchemy models and sessions,
-Alembic migrations, consistent API errors, local file storage, and health
-endpoints. All four document endpoints are implemented with tests:
-`POST /documents` (PDF signature + readability check, 20 MB / 10-page limits,
-SHA-256 hashing, atomic file storage, record creation, cleanup on failure),
-`GET /documents` (metadata list, newest first), `GET /documents/{id}` (one
-document's metadata), and `GET /documents/{id}/file` (streams the stored PDF,
-path-traversal safe, filesystem paths never exposed). Still not implemented: the
-frontend.
+**Stage 2 (upload foundation) is complete.**
 
-The current authorized work is **Stage 2: the upload foundation**. Do not implement invoice extraction or later processing stages during Stage 2.
+- FastAPI backend: environment-based config, async PostgreSQL, SQLAlchemy,
+  Alembic, consistent API errors, health endpoints, local file storage.
+- Endpoints: `POST /documents`, `GET /documents`, `GET /documents/{id}`,
+  `GET /documents/{id}/file`.
+- Server-authoritative PDF validation (one PDF per request, readable content,
+  ≤ 20 MB, ≤ 10 pages), SHA-256 hashing, atomic storage, PostgreSQL metadata,
+  cleanup when storage or database persistence fails.
+- Next.js + TypeScript frontend: drag/drop upload, client-side PDF and size
+  checks, progress and feedback, document list with statuses, links to view
+  originals.
+- Backend test suite green (41 tests at the Stage 2 checkpoint).
+
+Accepted documents stay in `UPLOADED` until real processing begins.
+
+**The authorized next stage is Stage 3: structured invoice extraction** —
+convert a stored PDF into schema-constrained invoice data with a per-field
+confidence value. Stage 3 does not implement normalization, business validation,
+escalation decisions, or human review. The full specification (field contract,
+persistence columns, preprocessing steps, provider-evaluation criteria, API
+paths, required tests) is in `docs/stage-3-extraction.md`; read it before
+implementing.
 
 ## Technology decisions
 
@@ -27,300 +43,138 @@ The current authorized work is **Stage 2: the upload foundation**. Do not implem
 - Backend: Python with FastAPI
 - ORM: SQLAlchemy
 - Database: PostgreSQL only; do not use SQLite
-- Database migrations: Alembic or the conventional SQLAlchemy-compatible equivalent
+- Database migrations: Alembic
 - Development file storage: local filesystem
 - Production object storage: deferred
-- AI or extraction provider: undecided and deferred
 - Overall architecture: modular monolith, not microservices
+- AI/extraction provider: not selected yet; make this decision before provider
+  integration and keep it behind a narrow interface
+- Monetary and quantity values: decimal arithmetic, never binary floating point
 
 ## Architectural overview
 
 ```text
-Browser
-   |
-   v
-Next.js frontend
-   |
-   v
-FastAPI backend
-   |-- PostgreSQL metadata
-   |-- Local PDF storage
-   `-- Future processing pipeline
-       |-- Extraction
-       |-- Normalization
-       |-- Validation
-       `-- Decision
+Browser -> Next.js frontend -> FastAPI document API
+   |-- PostgreSQL metadata and extraction records
+   |-- Local original-PDF storage
+   `-- Processing pipeline
+       |-- Extraction             <- Stage 3
+       |-- Normalization          <- later
+       |-- Validation             <- later
+       `-- Decision / escalation  <- later
 ```
 
-The processing stages should remain separate backend modules, but Stage 2 must not implement their behavior.
+Extraction must be a separate backend subsystem. Provider-specific OCR, vision,
+or LLM responses must not leak into API, database, normalization, or validation
+contracts.
 
-## Existing directory structure
+## Directory structure
 
 ```text
 LedgerDrop/
-|-- frontend/
-|   |-- public/
-|   `-- src/
+|-- frontend/ (public/, src/)
 |-- backend/
-|   |-- app/
-|   |   |-- api/
-|   |   |-- core/
-|   |   |-- database/
-|   |   |-- models/
-|   |   |-- schemas/
-|   |   `-- services/
-|   |       |-- storage/
-|   |       `-- processing/
-|   |           |-- extraction/
-|   |           |-- normalization/
-|   |           |-- validation/
-|   |           `-- decision/
+|   |-- app/ (api/, core/, database/, models/, schemas/,
+|   |         services/storage/, services/processing/{extraction,
+|   |         normalization,validation,decision}/)
 |   `-- tests/
-|-- storage/
-|   `-- uploads/
+|-- storage/uploads/
 `-- docs/
 ```
 
-Follow this structure unless a small adjustment is necessary for the chosen framework's conventional layout. Do not reorganize the whole project without discussing it first.
+Follow this structure unless a small conventional adjustment is necessary. Do
+not reorganize the project without discussing it first.
 
-## MVP document constraints
+## Input constraints
 
-Stage 2 accepts one document type with these limits:
+- PDF only; English-language invoices; one file per upload request
+- Maximum file size: 20 MB; maximum page count: 10 pages
+- Structurally readable PDF content is required
 
-- PDF only
-- English-language invoices
-- One file per upload request
-- Maximum file size: 20 MB
-- Maximum page count: 10 pages
-- The PDF must be structurally readable rather than merely having a `.pdf` extension
+Stage 3 may determine that a readable PDF is not an invoice, is not in English,
+or cannot be extracted. Do not broaden input support to images or other file
+types during this stage.
 
-Language and invoice-content verification belong to later processing and do not need to be enforced during Stage 2.
+## Stage 3 guardrails (summary — full spec in `docs/stage-3-extraction.md`)
 
-## Stage 2 goal
+- Lifecycle: `UPLOADED -> PROCESSING -> COMPLETED | FAILED`, and
+  `FAILED -> PROCESSING -> COMPLETED | FAILED` on explicit retry. Do not set
+  `PROCESSING` until extraction actually begins. `COMPLETED` means extraction
+  finished only — not normalization or validation. `NEEDS_REVIEW` is not a
+  Stage 3 status and must not be assigned for low confidence.
+- One active extraction per document; reject duplicate or concurrent starts.
+  A failure must leave the document and original PDF intact.
+- Provider stays behind a small interface (input: provider-ready content;
+  output: the validated internal contract). No application code depends on a
+  provider SDK. Document the provider choice before building the real adapter.
+- Every provider response is parsed and validated against the invoice schema
+  before persistence; malformed output is never stored as a success. Raw
+  provider responses are internal audit data and are never returned by public
+  endpoints.
+- Per-field confidence is a decimal in `[0, 1]` or `null`; there is no
+  document-level confidence. Missing values are `null`, never invented.
+- Money and quantities are decimals and must serialize without floating-point
+  artifacts. Do not default missing currency to EUR or convert currencies.
+- Schema changes go through Alembic migrations.
+- New API: start extraction, get latest result with per-field confidence, retry
+  a failed extraction, `404` for unknown IDs, a clear conflict response for
+  illegal status transitions. Stage 2 endpoints stay backward compatible.
+- Frontend: show real processing status and, at most, a read-only extraction
+  result. No editable human-review workflow.
+- Automated tests use a deterministic fake provider and never call an external
+  AI service.
 
-Stage 2 is complete when a user can:
+## Stage 2 behavior that must stay intact
 
-1. Upload a valid PDF through the web interface.
-2. Receive a clear success or validation-error response.
-3. See the uploaded document in a newest-first document list.
-4. Retrieve the document's metadata.
-5. Open or download the stored original PDF through the backend.
-
-A successful upload remains in `UPLOADED` status. It must not be marked `PROCESSING` until a real processor exists and has started work.
-
-## Stage 2 backend requirements
-
-Set up the FastAPI application with:
-
-- An application entry point
-- Environment-based settings
-- PostgreSQL connectivity
-- SQLAlchemy models and session handling
-- Database migrations
-- Consistent API errors
-- A local file-storage service
-- Appropriate separation between API routes, schemas, models, database setup, and storage behavior
-
-Avoid unnecessary layers or premature microservices.
-
-## Initial document database model
-
-Create a `documents` table with the following conceptual fields:
-
-```text
-document_id          UUID primary key
-original_filename    text, required
-file_location        text, required
-file_hash            text, required
-file_size_bytes      integer/bigint, required
-page_count           integer, required
-status               enum or constrained text, required
-uploaded_at           timezone-aware timestamp, required
-updated_at            timezone-aware timestamp, required
-```
-
-Implementation notes:
-
-- UUIDs are generated by the application or PostgreSQL using one consistent approach.
-- Store timestamps in UTC.
-- Do not expose `file_location` through public API responses.
-- The only successful status used in Stage 2 is `UPLOADED`.
-- Do not add document-level confidence. Confidence will belong to individual extracted fields in a later stage.
-- `file_hash` should contain a SHA-256 hash of the uploaded bytes.
-- The original PDF itself must not be stored in PostgreSQL.
-
-Future statuses, not implemented as active transitions yet, are:
-
-```text
-UPLOADED
-PROCESSING
-COMPLETED
-NEEDS_REVIEW
-FAILED
-```
-
-## File-storage behavior
-
-Store an accepted PDF at:
-
-```text
-storage/uploads/{document_id}/original.pdf
-```
-
-The database stores the corresponding reference. The original user filename is retained as metadata, but must not be used as the filesystem path.
-
-Upload handling must avoid orphaned database records and partially written files. If validation, file storage, or database creation fails, clean up any partial resource created by that request. Prefer writing safely and finalizing the file only after validation succeeds.
-
-Do not make the uploads directory directly public through Next.js. PDFs must be retrieved through the backend endpoint so access control can be added later.
-
-## Upload behavior
-
-`POST /documents` must:
-
-1. Accept one uploaded file.
-2. Ensure a file was supplied.
-3. Check the 20 MB size limit without trusting client-provided metadata alone.
-4. Confirm that the content is a readable PDF rather than relying only on its extension or MIME type.
-5. Determine and enforce the 10-page limit.
-6. Calculate the SHA-256 hash.
-7. Generate the document UUID.
-8. Store the original PDF under the generated document directory.
-9. Create the PostgreSQL document record.
-10. Return safe document metadata with status `UPLOADED`.
-
-Failed uploads should return a clear client-safe error and leave neither a document row nor a partial stored PDF.
-
-Duplicate-invoice detection is not part of Stage 2. The hash is collected now for later use; an identical hash does not yet need to cause rejection.
-
-## Initial API
-
-Implement these endpoints:
-
-### `POST /documents`
-
-Uploads and validates one PDF, stores it, creates the document record, and returns its public metadata.
-
-Example response shape:
-
-```json
-{
-  "document_id": "a5ae8bed-6ed1-41f1-9f21-08a9cd98f814",
-  "original_filename": "invoice-2048.pdf",
-  "file_size_bytes": 248102,
-  "page_count": 2,
-  "uploaded_at": "2026-09-01T14:32:10Z",
-  "updated_at": "2026-09-01T14:32:10Z",
-  "status": "UPLOADED"
-}
-```
-
-### `GET /documents`
-
-Returns public metadata for uploaded documents, ordered from newest to oldest. A simple response is sufficient for Stage 2; pagination may be added if it can be done without distracting from the MVP.
-
-### `GET /documents/{document_id}`
-
-Returns public metadata for one document. Return `404` when the document does not exist.
-
-### `GET /documents/{document_id}/file`
-
-Looks up the document, safely resolves its stored file, and streams the PDF with an appropriate content type and disposition. Never accept an arbitrary filesystem path from the requester. Return `404` when the record or stored file does not exist.
-
-## Frontend requirements
-
-Build a minimal Next.js TypeScript interface containing:
-
-- A drag-and-drop PDF upload area
-- A conventional file-selection button
-- A visible upload-progress or uploading state
-- Client-side checks for PDF type and the 20 MB limit
-- Clear validation and server-error messages
-- Successful-upload confirmation
-- A newest-first uploaded-document list
-- Each document's original filename, upload time, page count, and status
-- An action to open or download the original PDF
-
-Client-side checks are for user experience only. The FastAPI backend remains authoritative for all validation, including file type, integrity, size, and page count.
-
-Visual polish should remain proportional to Stage 2. Do not build the extraction results page or human-review workflow yet.
+- `POST /documents` validates and stores one PDF and returns `UPLOADED` metadata.
+- `GET /documents` lists safe metadata newest first;
+  `GET /documents/{id}` returns one record;
+  `GET /documents/{id}/file` safely streams the original PDF.
+- Files stay at `storage/uploads/{document_id}/original.pdf`; the database stores
+  only the relative reference. Internal paths and file hashes are never exposed.
+- Upload failures leave no orphaned files or database rows.
+- The backend remains authoritative for file type, integrity, size, and
+  page-count validation.
 
 ## Configuration
 
-Support environment configuration for at least:
+Existing: `DATABASE_URL`, `UPLOAD_DIRECTORY`, `MAX_FILE_SIZE_MB=20`,
+`MAX_PDF_PAGES=10`. Add provider configuration only after selecting the provider.
+Keep safe placeholders in `.env.example`; never commit credentials or
+machine-specific values.
 
-```text
-DATABASE_URL
-UPLOAD_DIRECTORY
-MAX_FILE_SIZE_MB=20
-MAX_PDF_PAGES=10
-```
+## Explicitly excluded from Stage 3
 
-Do not commit credentials or machine-specific secrets. Include a safe example environment file and ignore the real local environment file.
+Do not implement these unless the user explicitly adds them to Stage 3 scope:
 
-## Development infrastructure and documentation
-
-Stage 2 should include:
-
-- A local PostgreSQL development setup, preferably Docker Compose
-- Backend dependency configuration
-- Frontend dependency configuration
-- Migration commands
-- Backend and frontend startup instructions
-- A suitable `.gitignore`
-- A root README with concise local-development instructions
-
-Do not add production deployment infrastructure during this stage.
-
-## Required tests
-
-At minimum, cover:
-
-- Successful valid PDF upload
-- Rejection of a non-PDF file
-- Rejection of a file larger than 20 MB
-- Rejection of a PDF exceeding 10 pages
-- Rejection of a corrupted or unreadable PDF
-- Newest-first document listing
-- Retrieval of one document's metadata
-- Streaming of an existing PDF
-- `404` for an unknown document ID
-- Cleanup when file storage or database persistence fails partway through an upload
-
-Tests must not depend on external AI services.
-
-## Explicitly excluded from Stage 2
-
-Do not implement any of the following unless the user explicitly advances the project to a later stage:
-
-- OCR, vision, LLM, or invoice extraction
-- AI provider integration
-- Invoice field database tables
-- Field-level or document-level confidence calculations
-- Normalization of invoice contents
-- Invoice validation rules
+- Normalization rules beyond safe parsing into the extraction contract
+- Defaulting missing currency to EUR or converting currencies
+- Deterministic invoice validation and total reconciliation
+- Confidence thresholds or discarding uncertain fields
 - Duplicate-invoice decisions
-- Escalation decisions
+- Escalation decisions and `NEEDS_REVIEW` transitions
 - High-value invoice rules
-- Human-review screens or actions
-- Processing jobs or background queues
-- Active transitions to `PROCESSING`, `COMPLETED`, `NEEDS_REVIEW`, or `FAILED`
-- Production object storage
+- Human-review screens, editing, approval, or rejection
+- Downstream business-database integration
 - Authentication, organizations, or multi-tenancy
-- Production deployment configuration
-- Support for images or non-PDF documents
+- Production object storage or deployment infrastructure
+- Images or non-PDF upload support
+- Autonomous or multi-agent processing
 
-## Later invoice-processing specification
-
-The full future specification for extraction, normalization, confidence, and
-escalation lives in `docs/processing-spec.md`. It is future context only and must
-not be implemented during Stage 2. Read that file only when the project is
-explicitly advanced to an extraction or processing stage.
+Deferred normalization, validation, confidence, and escalation context lives in
+`docs/processing-spec.md`. Stage 3 may read it to keep contracts compatible but
+must not implement its deferred decisions.
 
 ## Implementation conduct
 
-- Stay within the authorized stage.
-- Prefer straightforward, maintainable code over speculative abstractions.
-- Preserve the modular boundaries between upload/storage and future processing stages.
-- Do not expose internal paths, secrets, or unsafe exception details through the API.
-- If a decision would materially expand scope, record the question and ask before implementing it.
-- Update documentation when an agreed architectural decision changes.
+- Stay within the authorized stage; if a decision materially expands scope,
+  record the question and ask before implementing.
+- Resolve the provider and API-contract decisions before coupling application
+  code to an external service; keep provider behavior replaceable and
+  deterministic in tests.
+- Prefer straightforward, maintainable modules over speculative abstractions.
+- Preserve clean boundaries between upload/storage, extraction, normalization,
+  validation, and decisions.
+- Keep public errors client-safe; never expose internal paths, secrets, raw
+  provider payloads, or stack traces. Retain useful internal diagnostics.
+- Update this document and the relevant READMEs when an agreed decision changes.
