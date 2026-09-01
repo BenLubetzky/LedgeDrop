@@ -140,7 +140,6 @@ class ExtractionAttempt(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("documents.document_id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
 
     # 1-based; retry N produces attempt_number N. Unique per document.
@@ -242,7 +241,6 @@ class ExtractionLineItem(Base):
     extraction_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("invoice_extractions.extraction_id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
 
     # 0-based order of the line item within its extraction attempt.
