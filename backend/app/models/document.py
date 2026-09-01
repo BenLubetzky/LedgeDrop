@@ -10,11 +10,15 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, Enum, Integer, String, Uuid, text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+
+if TYPE_CHECKING:
+    from app.models.extraction import ExtractionAttempt
 
 
 class DocumentStatus(str, enum.Enum):
@@ -77,6 +81,15 @@ class Document(Base):
     uploaded_at: Mapped[datetime] = mapped_column(nullable=False, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+    # Extraction attempts for this document, oldest attempt first. Added in
+    # Stage 3; does not affect any Stage 2 endpoint or the documents table.
+    extractions: Mapped[list[ExtractionAttempt]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ExtractionAttempt.attempt_number",
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
