@@ -30,6 +30,72 @@ Stage 3 is complete when LedgerDrop can:
 `NEEDS_REVIEW` is reserved for the later decision/escalation stage and must not
 be assigned merely because extraction confidence is low.
 
+## Implementation order
+
+Build Stage 3 in this sequence. Do not introduce an external AI/LLM call before
+the final integration step (step 12). Completed steps are noted in `CLAUDE.md`
+under "Current project state".
+
+1. **Define the extraction data contract.** Specify every invoice and line-item
+   field and the required `{value, confidence}` envelope. All scalar fields and
+   `line_items` must be present; values and confidences may be `null`. Dates stay
+   as raw strings for normalization. Money and quantities use decimals. This step
+   is schema definition only and makes no AI calls.
+2. **Design the extraction database models.** Add `invoice_extractions` linked to
+   `documents` and `invoice_line_items` linked to an extraction. Preserve
+   multiple attempts per document, nullable confidence, timestamps, status,
+   provider metadata, and safe failure information. These records represent
+   unnormalized, unvalidated extraction output — not canonical invoices.
+3. **Create the Alembic migration.** Add tables, foreign keys, constraints, and
+   indexes. Verify both upgrade and downgrade while preserving Stage 2 data and
+   behavior.
+4. **Create backend schemas.** Define separate internal, persistence, request,
+   and public response models as needed. Enforce the extraction structure,
+   confidence bounds, decimal types, unknown-key rejection, and safe public
+   output. Raw provider responses stay internal.
+5. **Build the extraction repository/service foundation.** Create and retrieve
+   attempts, store structured fields and line items transactionally, preserve
+   history, and prevent conflicting active attempts. Use manually supplied test
+   data at this point.
+6. **Implement the processing lifecycle.** Support
+   `UPLOADED -> PROCESSING -> COMPLETED | FAILED` and explicit retry from
+   `FAILED`. Do not use `NEEDS_REVIEW`. A failed attempt must leave the document
+   and original PDF intact.
+7. **Add extraction API endpoints.** Start an attempt, retrieve the latest or a
+   specific result where useful, and retry a failed attempt. Return `404` for
+   unknown resources and a conflict response for illegal or concurrent starts.
+   Keep the Stage 2 API backward compatible.
+8. **Build and test PDF preprocessing.** Safely read the stored original, extract
+   useful embedded text from digital PDFs, detect inadequate/no text, and prepare
+   scanned pages for future OCR or vision. Keep preprocessing independent of any
+   provider and never modify the original.
+9. **Create a deterministic fake extraction provider.** Implement the provider
+   interface with predictable success, malformed output, timeout, rate-limit, and
+   failure behaviors. Use it for application development and automated tests; it
+   must make no external calls.
+10. **Build an evaluation dataset.** Collect legally usable representative
+    invoices and manually record expected fields. Include digital, scanned,
+    multi-page, incomplete, multi-line-item, unusual-layout, low-quality, and
+    non-invoice PDFs.
+11. **Evaluate and select the real provider.** Compare field and line-item
+    accuracy, scanned-PDF support, structured output, field-confidence quality,
+    latency, cost, privacy, retention, rate limits, and testability. Do not treat
+    an LLM's self-reported probability as meaningful confidence without
+    evaluation.
+12. **Integrate the real provider last.** Add only a replaceable adapter behind
+    the established interface. Require schema-constrained output and validate it
+    before persistence. Store genuine provider confidence or `null`; never
+    fabricate confidence or save arbitrary model prose as application state.
+13. **Run the complete Stage 3 verification.** Cover relationships and
+    constraints, strict schemas, lifecycle and retries, concurrency protection,
+    preprocessing paths, malformed output, provider failures, transaction
+    rollback, retrieval and `404` behavior, and confirmation that the normal
+    automated suite never calls an external provider.
+
+Normalization follows Stage 3. It will interpret and validate raw date values,
+recognize currency codes, handle invalid extracted values, and apply other
+normalization rules. Stage 3 must not pull that work forward.
+
 ## Required invoice extraction contract
 
 The internal structured result contains these fields:
@@ -69,11 +135,12 @@ Contract rules:
 - There is no document-level confidence score.
 - Missing values are `null`, not empty strings and never invented values.
 - Invoice numbers and tax IDs remain strings.
-- Dates may use `YYYY-MM-DD` only when the source is unambiguous; ambiguous raw
-  values must not be silently interpreted. Full date normalization belongs to
-  the next stage.
-- Currency should be an extracted ISO code when clearly identified. Do not
-  silently convert amounts or default a missing currency to EUR in extraction.
+- Dates remain raw extracted strings. Extraction must not interpret, reformat,
+  or reject ambiguous or calendar-invalid date text; the normalization stage
+  will validate it and either produce `YYYY-MM-DD` or record a validation error.
+- Currency uses the conventional three-letter alphabetic form and is upper-cased
+  during extraction. Code recognition belongs to normalization; do not convert
+  amounts or default a missing currency to EUR.
 - Monetary values and quantities use decimals and must serialize without binary
   floating-point artifacts.
 - Preserve source evidence such as page number or quoted region when the

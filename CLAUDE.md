@@ -37,6 +37,10 @@ persistence columns, preprocessing steps, provider-evaluation criteria, API
 paths, required tests) is in `docs/stage-3-extraction.md`; read it before
 implementing.
 
+Stage 3 progress: step 1 (extraction data contract) is complete —
+`backend/app/schemas/extraction.py`, tested in
+`backend/tests/test_extraction_contract.py`.
+
 ## Technology decisions
 
 - Frontend: Next.js with TypeScript
@@ -114,7 +118,14 @@ types during this stage.
 - Per-field confidence is a decimal in `[0, 1]` or `null`; there is no
   document-level confidence. Missing values are `null`, never invented.
 - Money and quantities are decimals and must serialize without floating-point
-  artifacts. Do not default missing currency to EUR or convert currencies.
+  artifacts.
+- Date values stay raw strings during extraction — not interpreted, reformatted,
+  or rejected here. Currency is the conventional 3-letter alphabetic form,
+  upper-cased. Neither is converted, defaulted, or recognized until
+  normalization.
+- Every scalar field, both keys of every `{value, confidence}` pair, and
+  `line_items` must be present in a payload. Values and confidences may be
+  `null`; later stages judge their meaning.
 - Schema changes go through Alembic migrations.
 - New API: start extraction, get latest result with per-field confidence, retry
   a failed extraction, `404` for unknown IDs, a clear conflict response for
@@ -123,6 +134,32 @@ types during this stage.
   result. No editable human-review workflow.
 - Automated tests use a deterministic fake provider and never call an external
   AI service.
+
+## Stage 3 implementation order
+
+Build in this sequence. Introduce no external AI/LLM call before step 12. Each
+step is described in full in `docs/stage-3-extraction.md`.
+
+1. Define the extraction data contract (schema only, no AI).
+2. Design the extraction database models (`invoice_extractions`,
+   `invoice_line_items`; multiple attempts per document).
+3. Create the Alembic migration (verify upgrade + downgrade; Stage 2 data intact).
+4. Create the backend schemas (internal / persistence / request / public).
+5. Build the extraction repository/service foundation (transactional writes,
+   attempt history, no conflicting active attempts).
+6. Implement the processing lifecycle and explicit retry.
+7. Add the extraction API endpoints (`404` + conflict responses; Stage 2 API
+   unchanged).
+8. Build and test PDF preprocessing (provider-independent; original untouched).
+9. Create a deterministic fake extraction provider (no external calls).
+10. Build an evaluation dataset.
+11. Evaluate and select the real provider.
+12. Integrate the real provider last (replaceable adapter behind the interface;
+    schema-validate before persistence).
+13. Run the complete Stage 3 verification.
+
+Normalization follows Stage 3 and owns date interpretation, currency-code
+recognition, and handling of invalid extracted values. Do not pull that forward.
 
 ## Stage 2 behavior that must stay intact
 
