@@ -1,0 +1,26 @@
+# Local development services for LedgerDrop.
+# Stage 2 only needs PostgreSQL; the backend and frontend are run directly on the
+# host during development.
+#
+#   docker compose up -d db
+#
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ledgerdrop-db
+    environment:
+      POSTGRES_USER: ledgerdrop
+      POSTGRES_PASSWORD: ledgerdrop
+      POSTGRES_DB: ledgerdrop
+    ports:
+      - "5432:5432"
+    volumes:
+      - ledgerdrop_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledgerdrop -d ledgerdrop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ledgerdrop_pgdata:

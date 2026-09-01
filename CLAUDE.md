@@ -8,7 +8,11 @@ The first supported use case is processing English-language invoices supplied as
 
 ## Current project state
 
-The project currently contains directories only. No application code, dependencies, configuration, database, or infrastructure has been implemented.
+The Stage 2 backend foundation has been implemented: FastAPI application setup,
+environment-based configuration, async PostgreSQL connectivity, SQLAlchemy models
+and sessions, Alembic migrations, consistent API errors, local file storage, health
+endpoints, and foundation tests are present. The document upload endpoints, PDF
+validation workflow, and frontend have not yet been implemented.
 
 The current authorized work is **Stage 2: the upload foundation**. Do not implement invoice extraction or later processing stages during Stage 2.
 
@@ -315,4 +319,3 @@ explicitly advanced to an extraction or processing stage.
 - Do not expose internal paths, secrets, or unsafe exception details through the API.
 - If a decision would materially expand scope, record the question and ask before implementing it.
 - Update documentation when an agreed architectural decision changes.
-
