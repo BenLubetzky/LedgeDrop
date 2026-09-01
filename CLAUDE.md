@@ -8,11 +8,16 @@ The first supported use case is processing English-language invoices supplied as
 
 ## Current project state
 
-The Stage 2 backend foundation has been implemented: FastAPI application setup,
-environment-based configuration, async PostgreSQL connectivity, SQLAlchemy models
-and sessions, Alembic migrations, consistent API errors, local file storage, health
-endpoints, and foundation tests are present. The document upload endpoints, PDF
-validation workflow, and frontend have not yet been implemented.
+The Stage 2 backend is complete: FastAPI application setup, environment-based
+configuration, async PostgreSQL connectivity, SQLAlchemy models and sessions,
+Alembic migrations, consistent API errors, local file storage, and health
+endpoints. All four document endpoints are implemented with tests:
+`POST /documents` (PDF signature + readability check, 20 MB / 10-page limits,
+SHA-256 hashing, atomic file storage, record creation, cleanup on failure),
+`GET /documents` (metadata list, newest first), `GET /documents/{id}` (one
+document's metadata), and `GET /documents/{id}/file` (streams the stored PDF,
+path-traversal safe, filesystem paths never exposed). Still not implemented: the
+frontend.
 
 The current authorized work is **Stage 2: the upload foundation**. Do not implement invoice extraction or later processing stages during Stage 2.
 

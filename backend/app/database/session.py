@@ -44,6 +44,7 @@ async def get_db() -> AsyncIterator[AsyncSession]:
     """
     async with SessionLocal() as session:
         try:
+            # give the database session to the end point
             yield session
         except Exception:
             await session.rollback()

@@ -42,7 +42,35 @@ uv run uvicorn app.main:app --reload
 
 - `GET /health` — liveness
 - `GET /health/ready` — liveness + database connectivity
+- `POST /documents` — upload one PDF (`multipart/form-data`, field `file`); validates
+  extension + content, 20 MB / 10-page limits, hashes and stores it, creates the
+  record, returns `201` with public metadata. A failed upload leaves neither a row
+  nor a stored file.
+- `GET /documents` — all document metadata, newest first (by `uploaded_at`).
+- `GET /documents/{document_id}` — one document's metadata; `404 DOCUMENT_NOT_FOUND`
+  if unknown, `422 VALIDATION_ERROR` if the id is not a UUID.
+- `GET /documents/{document_id}/file` — streams the stored PDF
+  (`Content-Type: application/pdf`, `Content-Disposition: inline; filename="<original>"`).
+  `404 DOCUMENT_NOT_FOUND` if the record is unknown; `404 FILE_NOT_FOUND` if the
+  record exists but the stored file is missing. The server's filesystem path is
+  never exposed.
 - Interactive docs at `http://localhost:8000/docs`
+
+Public metadata (`DocumentRead`) is `document_id`, `original_filename`,
+`file_size_bytes`, `page_count`, `status`, `uploaded_at`, `updated_at`.
+`file_location` and `file_hash` are never returned by any endpoint.
+
+### Upload error codes
+
+| Status | `error.code` | Cause |
+|--------|--------------|-------|
+| 400 | `FILE_REQUIRED` / `EMPTY_FILE` | no file part, or zero bytes |
+| 400 | `FILENAME_TOO_LONG` | original filename exceeds 512 characters |
+| 413 | `FILE_TOO_LARGE` | body exceeds `MAX_FILE_SIZE_MB` |
+| 415 | `NOT_A_PDF` | wrong extension, or missing `%PDF-` signature |
+| 422 | `PDF_UNREADABLE` | signature present but structure unparseable |
+| 422 | `TOO_MANY_PAGES` | exceeds `MAX_PDF_PAGES` |
+| 422 | `VALIDATION_ERROR` | no `file` field in the request at all |
 
 ## Tests
 
@@ -72,11 +100,15 @@ app/
     session.py       async engine, session factory, get_db dependency
   models/
     document.py      the documents table
+  schemas/
+    document.py      DocumentRead - public metadata (no file_location / file_hash)
   services/
+    pdf.py           inspect_pdf: signature + readability + page-count check
     storage/
       local.py       LocalFileStorage: atomic writes, path-traversal safe
   api/
     deps.py          shared dependencies (get_db, get_storage)
+    documents.py     POST /documents, GET /documents[/{id}[/file]]
     health.py        health endpoints
     router.py        aggregate router
 alembic/             migration environment (async) + versions/

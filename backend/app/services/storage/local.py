@@ -94,6 +94,18 @@ class LocalFileStorage:
         path = self.resolve(location)
         return await anyio.to_thread.run_sync(path.is_file)
 
+    async def path_for(self, location: str) -> Path:
+        """Resolve ``location`` to an existing file path inside the storage root.
+
+        Raises :class:`StorageError` if the location escapes the root (see
+        :meth:`resolve`) or if no file exists there. Callers use the returned
+        path only to stream the file; it is never surfaced to API clients.
+        """
+        path = self.resolve(location)
+        if not await anyio.to_thread.run_sync(path.is_file):
+            raise StorageError(f"No stored file at {location!r}.")
+        return path
+
     async def delete(self, document_id: uuid.UUID | str) -> None:
         """Remove a document's directory. No-op if it does not exist."""
         target = (self._base_dir / str(document_id)).resolve()

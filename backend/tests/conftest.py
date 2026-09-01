@@ -22,11 +22,12 @@ from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from app.api.deps import get_db  # noqa: E402
+from app.api.deps import get_db, get_storage  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.database.base import Base  # noqa: E402
 import app.models  # noqa: E402,F401  (registers tables on Base.metadata)
 from app.main import create_app  # noqa: E402
+from app.services.storage import LocalFileStorage  # noqa: E402
 
 
 def _test_database_url() -> str:
@@ -86,7 +87,13 @@ async def db_session(session_factory) -> AsyncIterator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def client(session_factory) -> AsyncIterator[AsyncClient]:
+def storage(tmp_path) -> LocalFileStorage:
+    """Local file storage rooted in a throwaway directory for each test."""
+    return LocalFileStorage(tmp_path / "uploads")
+
+
+@pytest_asyncio.fixture
+async def client(session_factory, storage) -> AsyncIterator[AsyncClient]:
     app = create_app()
 
     async def _override_get_db() -> AsyncIterator[AsyncSession]:
@@ -100,6 +107,7 @@ async def client(session_factory) -> AsyncIterator[AsyncClient]:
                 await session.commit()
 
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_storage] = lambda: storage
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client
