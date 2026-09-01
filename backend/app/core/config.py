@@ -20,7 +20,11 @@ REPO_ROOT = BACKEND_DIR.parent
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Absolute path so `backend/.env` is picked up no matter which directory
+        # the process is launched from. Real environment variables still win over
+        # the file. Values in the file are for local development only; credentials
+        # and machine-specific values live here and the file is git-ignored.
+        env_file=str(BACKEND_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
