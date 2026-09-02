@@ -74,9 +74,12 @@ Public metadata (`DocumentRead`) is `document_id`, `original_filename`,
 
 ## Extraction API (Stage 3)
 
-Stage 3 adds structured invoice extraction. The endpoints are live; they run on
-a **deterministic offline fake provider** (`FakeExtractionProvider`,
-`provider_name` `fake-deterministic`) until a real one is chosen and integrated.
+Stage 3 adds structured invoice extraction. The endpoints run on the
+**deterministic offline fake provider** (`FakeExtractionProvider`,
+`provider_name` `fake-deterministic`) by default, or the real
+**OpenAI GPT-5-mini adapter** (`OpenAIExtractionProvider`, `provider_name`
+`openai`) when `EXTRACTION_PROVIDER=openai` and `OPENAI_API_KEY` are set — see
+[`docs/provider-selection.md`](../docs/provider-selection.md).
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -199,12 +202,26 @@ development and every automated test — no external calls. `FakeBehavior`
 selects `SUCCESS` (a fixed payload seeded by document id), `MALFORMED`,
 `TIMEOUT`, `RATE_LIMITED`, or `ERROR`.
 
-The provisional first real adapter is Azure AI Document Intelligence
-`prebuilt-invoice`; AWS Textract `AnalyzeExpense` is the comparison candidate.
-Neither has yet been benchmarked on LedgerDrop, so this is not a validated
-production selection. Confidence remains `null` at application level until a
-representative live evaluation demonstrates that provider scores track actual
-correctness. The evidence gates, proposed mapping, and inert config keys are in
+`OpenAIExtractionProvider` (`openai_provider.py`) is the real adapter: OpenAI
+GPT-5-mini, called through the Responses API with a strict `json_schema`
+response format naming every `InvoiceExtraction` field, so the API itself
+rejects any other shape. The original PDF bytes are sent as-is (no local
+rendering); OpenAI extracts text and page images from the PDF itself. The
+decoded response is mapped into the same payload shape the fake provider
+returns and still goes through the same `InvoiceExtraction` validation before
+persistence — nothing about a provider response is trusted without that check.
+GPT-5-mini has no calibrated per-field confidence, so the adapter never asks
+for one: every field's confidence is `None`, unconditionally. The full raw API
+response is kept only as internal audit data
+(`ExtractionAttempt.raw_response`), never returned by a public endpoint.
+Configured via `EXTRACTION_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL`
+(default `gpt-5-mini`); `EXTRACTION_PROVIDER` stays `fake` (the default) until
+a real key is supplied.
+
+This was selected without running the Azure/AWS bake-off Stage 3 originally
+called for; Azure AI Document Intelligence `prebuilt-invoice` remains a
+candidate for a later migration behind the same `ExtractionProvider`
+interface. Full rationale in
 [`docs/provider-selection.md`](../docs/provider-selection.md).
 
 ### Evaluation dataset
@@ -263,6 +280,7 @@ app/
         preprocessing.py   stored PDF -> per-page text + OCR flags (provider-independent)
         provider.py        ExtractionProvider interface + ProviderError hierarchy
         fake.py            FakeExtractionProvider - deterministic offline double
+        openai_provider.py OpenAIExtractionProvider - real adapter (GPT-5-mini)
   api/
     deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor)
     documents.py     POST /documents, GET /documents[/{id}[/file]]

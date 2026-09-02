@@ -37,7 +37,7 @@ persistence columns, preprocessing steps, provider-evaluation criteria, API
 paths, required tests) is in `docs/stage-3-extraction.md`; read it before
 implementing.
 
-Stage 3 progress: steps 1–10 are complete. The extraction data contract
+Stage 3 progress: steps 1–12 are complete. The extraction data contract
 (`backend/app/schemas/extraction.py`), the persistence models
 (`backend/app/models/extraction.py`) and their Alembic migration
 (`0002_invoice_extraction_tables`), the backend schemas
@@ -58,15 +58,19 @@ truth, `generate_invoices.py`, `dataset.py`). `ExtractionService.start` /
 `test_extraction_schemas.py`, `test_extraction_service.py`,
 `test_extractions_api.py`, `test_extraction_preprocessing.py`,
 `test_fake_extraction_provider.py`, `test_eval_dataset.py`,
-`test_eval_scoring.py`. Step 11 has a provisional implementation target,
-documented in `docs/provider-selection.md`: Azure AI Document Intelligence
-`prebuilt-invoice`, with AWS Textract `AnalyzeExpense` as the live comparison.
-No real-provider benchmark has run yet, so production selection and confidence
-meaningfulness remain unvalidated. Application confidence stays `null` until a
-representative bake-off demonstrates calibration. The offline accuracy and
-confidence harness is `backend/evaluation/scoring.py`. Next is step 12: build
-the replaceable adapters, run the explicit live comparison, and record accuracy,
-line-item quality, latency, observed cost, and confidence calibration.
+`test_eval_scoring.py`. The offline accuracy and confidence harness is
+`backend/evaluation/scoring.py`.
+
+Step 12 (the real provider) is integrated: OpenAI GPT-5-mini, behind the same
+`ExtractionProvider` interface, in `openai_provider.py`
+(`OpenAIExtractionProvider`; test: `test_openai_extraction_provider.py`), with
+`EXTRACTION_PROVIDER=openai|fake` selecting it in `app/api/deps.py` (`fake` by
+default). This was a deliberate deviation from the step 11 Azure/AWS bake-off
+plan — GPT-5-mini was selected without running that comparison, with Azure
+kept as a candidate for a later migration. GPT-5-mini has no calibrated
+per-field confidence, so the adapter never asks for one: application
+confidence stays `null` unconditionally for every field, not just until a
+bake-off runs. Full rationale in `docs/provider-selection.md`.
 
 ## Technology decisions
 

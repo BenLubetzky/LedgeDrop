@@ -7,9 +7,9 @@ connection strings - those must be supplied by the environment.
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Repository layout: this file is backend/app/core/config.py, so three parents up
@@ -61,6 +61,28 @@ class Settings(BaseSettings):
     # --- Document constraints (Stage 2 MVP limits) ---------------------- --
     max_file_size_mb: int = 20
     max_pdf_pages: int = 10
+
+    # --- Stage 3 extraction provider -------------------------------------
+    # "fake" (deterministic, offline) or "openai" (GPT-5-mini, real calls).
+    extraction_provider: Literal["fake", "openai"] = "fake"
+    openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-5-mini"
+    extraction_provider_timeout_seconds: int = Field(default=60, gt=0)
+
+    @field_validator("openai_model")
+    @classmethod
+    def _require_model_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("OPENAI_MODEL must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _require_openai_key(self) -> "Settings":
+        if self.extraction_provider == "openai":
+            if self.openai_api_key is None or not self.openai_api_key.get_secret_value().strip():
+                raise ValueError("OPENAI_API_KEY is required when EXTRACTION_PROVIDER=openai")
+        return self
 
     @field_validator("upload_directory")
     @classmethod

@@ -11,6 +11,11 @@ from app.services.processing.extraction.fake import (
     FakeBehavior,
     FakeExtractionProvider,
 )
+from app.services.processing.extraction.openai_provider import (
+    DEFAULT_OPENAI_MODEL,
+    OPENAI_PROVIDER_NAME,
+    OpenAIExtractionProvider,
+)
 from app.services.processing.extraction.preprocessing import (
     PreparedDocument,
     PreparedPage,
@@ -23,6 +28,7 @@ from app.services.processing.extraction.provider import (
     ExtractionProvider,
     ProviderError,
     ProviderPayload,
+    ProviderResponse,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
@@ -47,6 +53,7 @@ __all__ = [
     "TextLayer",
     "ExtractionProvider",
     "ProviderPayload",
+    "ProviderResponse",
     "ProviderError",
     "ProviderTimeoutError",
     "ProviderRateLimitError",
@@ -55,4 +62,7 @@ __all__ = [
     "FakeBehavior",
     "FAKE_PROVIDER_NAME",
     "FAKE_PROVIDER_MODEL",
+    "OpenAIExtractionProvider",
+    "OPENAI_PROVIDER_NAME",
+    "DEFAULT_OPENAI_MODEL",
 ]

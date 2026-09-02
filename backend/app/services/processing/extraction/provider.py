@@ -16,11 +16,18 @@ The interface is intentionally tiny:
 A provider must never make the malformed / invalid case a raised error - it
 returns the payload and the service rejects it, so "the provider answered but
 the answer was unusable" and "the provider failed" stay distinguishable.
+
+A provider may optionally return a :class:`ProviderResponse` instead of a bare
+payload. Its ``raw_response`` is provider-native data kept only for internal
+audit (never returned by a public endpoint; see
+:class:`~app.models.extraction.ExtractionAttempt.raw_response`). Providers with
+nothing to audit (e.g. the fake) return a bare payload.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from app.schemas.extraction import InvoiceExtraction
@@ -30,6 +37,16 @@ from app.services.processing.extraction.preprocessing import PreparedDocument
 # (e.g. decoded JSON) for the service to validate.
 ProviderPayload = InvoiceExtraction | Mapping[str, Any]
 
+@dataclass(frozen=True)
+class ProviderResponse:
+    """A validated payload plus optional provider-native audit data."""
+
+    payload: ProviderPayload
+    raw_response: Mapping[str, Any] | None = None
+
+
+ProviderResult = ProviderPayload | ProviderResponse
+
 
 @runtime_checkable
 class ExtractionProvider(Protocol):
@@ -37,7 +54,7 @@ class ExtractionProvider(Protocol):
 
     name: str
 
-    async def extract(self, prepared: PreparedDocument) -> ProviderPayload: ...
+    async def extract(self, prepared: PreparedDocument) -> ProviderResult: ...
 
 
 class ProviderError(Exception):
@@ -67,6 +84,8 @@ class ProviderUnavailableError(ProviderError):
 
 __all__ = [
     "ProviderPayload",
+    "ProviderResponse",
+    "ProviderResult",
     "ExtractionProvider",
     "ProviderError",
     "ProviderTimeoutError",

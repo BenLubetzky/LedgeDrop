@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from app.core.config import REPO_ROOT, Settings
 
 
@@ -37,3 +40,33 @@ def test_cors_origins_accepts_comma_separated_string() -> None:
 def test_is_test_flag() -> None:
     assert Settings(_env_file=None, ENVIRONMENT="test").is_test is True
     assert Settings(_env_file=None, ENVIRONMENT="development").is_test is False
+
+
+def test_extraction_provider_rejects_unknown_values() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, EXTRACTION_PROVIDER="typo")
+
+
+def test_openai_provider_requires_a_non_empty_key() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, EXTRACTION_PROVIDER="openai")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, EXTRACTION_PROVIDER="openai", OPENAI_API_KEY="   ")
+
+
+def test_openai_configuration_is_validated_and_key_is_secret() -> None:
+    settings = Settings(
+        _env_file=None,
+        EXTRACTION_PROVIDER="openai",
+        OPENAI_API_KEY="sk-test-value",
+        OPENAI_MODEL="  gpt-5-mini  ",
+        EXTRACTION_PROVIDER_TIMEOUT_SECONDS=30,
+    )
+    assert settings.openai_model == "gpt-5-mini"
+    assert settings.openai_api_key.get_secret_value() == "sk-test-value"
+    assert "sk-test-value" not in repr(settings)
+
+
+def test_provider_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, EXTRACTION_PROVIDER_TIMEOUT_SECONDS=0)

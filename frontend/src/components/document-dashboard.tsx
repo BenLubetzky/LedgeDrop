@@ -33,6 +33,57 @@ type DocumentRecord = {
 
 type ApiErrorBody = { error?: { message?: string } };
 
+type ExtractedField = {
+  value: string | null;
+  confidence: string | null;
+};
+
+type ExtractionData = {
+  invoice_number: ExtractedField;
+  invoice_date: ExtractedField;
+  due_date: ExtractedField;
+  vendor_name: ExtractedField;
+  vendor_tax_id: ExtractedField;
+  customer_name: ExtractedField;
+  currency: ExtractedField;
+  subtotal: ExtractedField;
+  tax_amount: ExtractedField;
+  total_amount: ExtractedField;
+  line_items: Array<{
+    description: ExtractedField;
+    quantity: ExtractedField;
+    unit_price: ExtractedField;
+    line_total: ExtractedField;
+  }>;
+};
+
+type ExtractionResult = {
+  extraction_id: string;
+  document_id: string;
+  attempt_number: number;
+  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  provider_name: string;
+  provider_model: string | null;
+  started_at: string;
+  completed_at: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  data: ExtractionData;
+};
+
+const EXTRACTION_FIELDS: Array<[keyof Omit<ExtractionData, "line_items">, string]> = [
+  ["invoice_number", "Invoice number"],
+  ["invoice_date", "Invoice date"],
+  ["due_date", "Due date"],
+  ["vendor_name", "Vendor"],
+  ["vendor_tax_id", "Vendor tax ID"],
+  ["customer_name", "Customer"],
+  ["currency", "Currency"],
+  ["subtotal", "Subtotal"],
+  ["tax_amount", "Tax amount"],
+  ["total_amount", "Total amount"],
+];
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -122,6 +173,11 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
+function formatConfidence(value: string | null): string {
+  if (value === null) return "";
+  return `${Math.round(Number(value) * 100)}% confidence`;
+}
+
 function UploadIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -158,6 +214,11 @@ export function DocumentDashboard() {
   const [activeFilename, setActiveFilename] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [pendingRemovalId, setPendingRemovalId] = useState<string | null>(null);
+  const [removingDocumentId, setRemovingDocumentId] = useState<string | null>(null);
+  const [extractingDocumentId, setExtractingDocumentId] = useState<string | null>(null);
+  const [selectedExtraction, setSelectedExtraction] = useState<ExtractionResult | null>(null);
+  const [selectedDocumentName, setSelectedDocumentName] = useState<string | null>(null);
 
   const loadDocuments = useCallback(async () => {
     setListError(null);
@@ -239,6 +300,99 @@ export function DocumentDashboard() {
     if (isUploading) return;
     const file = event.dataTransfer.files?.[0];
     if (file) void startUpload(file);
+  };
+
+  const removeDocument = async (document: DocumentRecord) => {
+    setRemovingDocumentId(document.document_id);
+    setUploadError(null);
+    setSuccessMessage(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/documents/${document.document_id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        const body = await readJson(response);
+        throw new Error(messageFromBody(body, "The document could not be removed."));
+      }
+      setDocuments((current) =>
+        current.filter((item) => item.document_id !== document.document_id),
+      );
+      setSuccessMessage(`${document.original_filename} was removed.`);
+    } catch (error) {
+      setUploadError(errorMessage(error, "The document could not be removed."));
+    } finally {
+      setPendingRemovalId(null);
+      setRemovingDocumentId(null);
+    }
+  };
+
+  const showExtraction = async (document: DocumentRecord) => {
+    setExtractingDocumentId(document.document_id);
+    setUploadError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/documents/${document.document_id}/extractions/latest`,
+        { cache: "no-store" },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(messageFromBody(body, "The extraction could not be loaded."));
+      }
+      setSelectedDocumentName(document.original_filename);
+      setSelectedExtraction(body as ExtractionResult);
+    } catch (error) {
+      setUploadError(errorMessage(error, "The extraction could not be loaded."));
+    } finally {
+      setExtractingDocumentId(null);
+    }
+  };
+
+  const runExtraction = async (document: DocumentRecord) => {
+    const isRetry = document.status === "FAILED";
+    setExtractingDocumentId(document.document_id);
+    setUploadError(null);
+    setSuccessMessage(null);
+    setDocuments((current) =>
+      current.map((item) =>
+        item.document_id === document.document_id
+          ? { ...item, status: "PROCESSING" }
+          : item,
+      ),
+    );
+
+    try {
+      const suffix = isRetry ? "/retry" : "";
+      const response = await fetch(
+        `${API_BASE_URL}/documents/${document.document_id}/extractions${suffix}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(messageFromBody(body, "The extraction could not be started."));
+      }
+
+      const result = body as ExtractionResult;
+      setDocuments((current) =>
+        current.map((item) =>
+          item.document_id === document.document_id
+            ? { ...item, status: result.status }
+            : item,
+        ),
+      );
+      if (result.status === "COMPLETED") {
+        setSelectedDocumentName(document.original_filename);
+        setSelectedExtraction(result);
+        setSuccessMessage(`${document.original_filename} was extracted successfully.`);
+      } else if (result.status === "FAILED") {
+        setUploadError(result.failure_message ?? "The extraction failed. You can retry it.");
+      }
+    } catch (error) {
+      await loadDocuments();
+      setUploadError(errorMessage(error, "The extraction could not be started."));
+    } finally {
+      setExtractingDocumentId(null);
+    }
   };
 
   return (
@@ -376,9 +530,68 @@ export function DocumentDashboard() {
                       {formatDate(document.uploaded_at)}
                     </p>
                   </div>
-                  <span className={`status status-${document.status.toLowerCase()}`}>
-                    {document.status.replace("_", " ")}
+                  <span className="document-state-actions">
+                    <span className={`status status-${document.status.toLowerCase()}`}>
+                      {document.status.replace("_", " ")}
+                    </span>
+                    {document.status === "COMPLETED" ? (
+                      <button
+                        className="extraction-button"
+                        type="button"
+                        onClick={() => void showExtraction(document)}
+                        disabled={extractingDocumentId === document.document_id}
+                      >
+                        {extractingDocumentId === document.document_id ? "Loading…" : "View extraction"}
+                      </button>
+                    ) : (
+                      <button
+                        className="extraction-button"
+                        type="button"
+                        onClick={() => void runExtraction(document)}
+                        disabled={
+                          document.status === "PROCESSING" ||
+                          extractingDocumentId === document.document_id
+                        }
+                      >
+                        {document.status === "PROCESSING" || extractingDocumentId === document.document_id
+                          ? "Extracting…"
+                          : document.status === "FAILED"
+                            ? "Retry extraction"
+                            : "Extract"}
+                      </button>
+                    )}
                   </span>
+                  {pendingRemovalId === document.document_id ? (
+                    <span className="remove-confirmation">
+                      <span>Remove?</span>
+                      <button
+                        className="remove-confirm-button"
+                        type="button"
+                        onClick={() => void removeDocument(document)}
+                        disabled={removingDocumentId === document.document_id}
+                        aria-label={`Confirm removal of ${document.original_filename}`}
+                      >
+                        {removingDocumentId === document.document_id ? "Removing…" : "Yes"}
+                      </button>
+                      <button
+                        className="remove-cancel-button"
+                        type="button"
+                        onClick={() => setPendingRemovalId(null)}
+                        disabled={removingDocumentId === document.document_id}
+                      >
+                        No
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      className="remove-button"
+                      type="button"
+                      onClick={() => setPendingRemovalId(document.document_id)}
+                      aria-label={`Remove ${document.original_filename}`}
+                    >
+                      Remove
+                    </button>
+                  )}
                   <a
                     className="view-link"
                     href={`${API_BASE_URL}/documents/${document.document_id}/file`}
@@ -407,6 +620,81 @@ export function DocumentDashboard() {
           </div>
         )}
       </div>
+
+      {selectedExtraction && (
+        <div
+          className="extraction-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSelectedExtraction(null);
+          }}
+        >
+          <section
+            className="extraction-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="extraction-title"
+          >
+            <header className="extraction-header">
+              <div>
+                <p className="eyebrow">Extracted invoice</p>
+                <h2 id="extraction-title">{selectedDocumentName}</h2>
+              </div>
+              <button
+                className="panel-close"
+                type="button"
+                onClick={() => setSelectedExtraction(null)}
+                aria-label="Close extraction details"
+              >
+                Close
+              </button>
+            </header>
+
+            <div className="extraction-fields">
+              {EXTRACTION_FIELDS.map(([key, label]) => {
+                const field = selectedExtraction.data[key];
+                return (
+                  <div className="extraction-field" key={key}>
+                    <span>{label}</span>
+                    <strong>{field.value ?? "Not found"}</strong>
+                    {field.confidence !== null && (
+                      <small>{formatConfidence(field.confidence)}</small>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="line-items-section">
+              <div className="line-items-heading">
+                <h3>Line items</h3>
+                <span>{selectedExtraction.data.line_items.length} items</span>
+              </div>
+              {selectedExtraction.data.line_items.length === 0 ? (
+                <p className="no-line-items">No line items were found.</p>
+              ) : (
+                <div className="line-items-table-wrap">
+                  <table className="line-items-table">
+                    <thead>
+                      <tr><th>Description</th><th>Quantity</th><th>Unit price</th><th>Total</th></tr>
+                    </thead>
+                    <tbody>
+                      {selectedExtraction.data.line_items.map((item, index) => (
+                        <tr key={`${selectedExtraction.extraction_id}-${index}`}>
+                          <td>{item.description.value ?? "—"}</td>
+                          <td>{item.quantity.value ?? "—"}</td>
+                          <td>{item.unit_price.value ?? "—"}</td>
+                          <td>{item.line_total.value ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

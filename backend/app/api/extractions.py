@@ -13,8 +13,10 @@ cannot legally transition (already processing, already extracted, not failed).
 An extraction that *runs* but fails is still a ``201`` - the attempt was
 created; its ``status`` is ``FAILED`` and ``failure_code`` says why.
 
-The extractor is injected (:func:`app.api.deps.get_extractor`); it is the
-deterministic offline fake until a real provider is integrated.
+The extractor is injected (:func:`app.api.deps.get_extractor`), selected by
+``EXTRACTION_PROVIDER`` - the deterministic offline fake by default, or the
+real GPT-5-mini adapter. The started/retried attempt records whichever
+provider actually ran it.
 """
 
 from __future__ import annotations
@@ -25,12 +27,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_extraction_service, get_prepared_result_producer
+from app.api.deps import get_db, get_extraction_service, get_extractor, get_prepared_result_producer
 from app.core.errors import NotFoundError
 from app.models.document import Document
 from app.schemas.extraction_api import ExtractionStartRequest, InvoiceExtractionResult
 from app.services.processing.extraction import ExtractionService, ResultProducer
-from app.services.processing.extraction.fake import FAKE_PROVIDER_MODEL, FAKE_PROVIDER_NAME
+from app.services.processing.extraction.provider import ExtractionProvider
 from app.services.processing.extraction.repository import ExtractionRepository
 
 router = APIRouter(prefix="/documents", tags=["extractions"])
@@ -53,13 +55,14 @@ async def start_extraction(
     document_id: uuid.UUID,
     service: Annotated[ExtractionService, Depends(get_extraction_service)],
     produce: Annotated[ResultProducer, Depends(get_prepared_result_producer)],
+    provider: Annotated[ExtractionProvider, Depends(get_extractor)],
     body: ExtractionStartRequest | None = None,
 ) -> InvoiceExtractionResult:
     attempt = await service.start(
         document_id,
         produce=produce,
-        provider_name=FAKE_PROVIDER_NAME, 
-        provider_model=FAKE_PROVIDER_MODEL,
+        provider_name=provider.name,
+        provider_model=getattr(provider, "model", None),
     )
     return InvoiceExtractionResult.from_attempt(attempt)
 
@@ -74,13 +77,14 @@ async def retry_extraction(
     document_id: uuid.UUID,
     service: Annotated[ExtractionService, Depends(get_extraction_service)],
     produce: Annotated[ResultProducer, Depends(get_prepared_result_producer)],
+    provider: Annotated[ExtractionProvider, Depends(get_extractor)],
     body: ExtractionStartRequest | None = None,
 ) -> InvoiceExtractionResult:
     attempt = await service.retry(
         document_id,
         produce=produce,
-        provider_name=FAKE_PROVIDER_NAME,
-        provider_model=FAKE_PROVIDER_MODEL,
+        provider_name=provider.name,
+        provider_model=getattr(provider, "model", None),
     )
     return InvoiceExtractionResult.from_attempt(attempt)
 

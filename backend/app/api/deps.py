@@ -21,6 +21,7 @@ from app.services.processing.extraction import (
     ResultProducer,
 )
 from app.services.processing.extraction.fake import FakeExtractionProvider
+from app.services.processing.extraction.openai_provider import OpenAIExtractionProvider
 from app.services.processing.extraction.preprocessing import (
     PreprocessingError,
     prepare_document,
@@ -51,14 +52,34 @@ def get_extraction_service(
     return ExtractionService(db)
 
 
+def _build_extractor() -> ExtractionProvider:
+    """Build the extraction provider the endpoints run on, per
+    ``EXTRACTION_PROVIDER``.
+
+    ``fake`` (default) is the deterministic offline double; ``openai`` calls
+    GPT-5-mini for real (see ``docs/provider-selection.md``). Built once at
+    import time - like ``_storage`` - so a real provider reuses one HTTP client
+    across requests instead of opening one per call.
+    """
+    if settings.extraction_provider == "openai":
+        return OpenAIExtractionProvider(
+            api_key=settings.openai_api_key.get_secret_value(),
+            model=settings.openai_model,
+            timeout_seconds=settings.extraction_provider_timeout_seconds,
+        )
+    return FakeExtractionProvider()
+
+
+_extractor = _build_extractor()
+
+
 def get_extractor() -> ExtractionProvider:
     """The extraction provider the endpoints run on.
 
-    The deterministic offline fake until a real provider is integrated
-    (Stage 3, steps 11-12). Tests that need failure behaviour override this with
-    a ``FakeExtractionProvider(FakeBehavior.<...>)``.
+    Tests that need failure behaviour override this with a
+    ``FakeExtractionProvider(FakeBehavior.<...>)``.
     """
-    return FakeExtractionProvider()
+    return _extractor
 
 
 def get_prepared_result_producer(

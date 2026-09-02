@@ -47,6 +47,7 @@ from app.models.extraction import ExtractionAttempt, ExtractionStatus
 from app.schemas.extraction import InvoiceExtraction
 from app.services.processing.extraction import lifecycle
 from app.services.processing.extraction.repository import ExtractionRepository
+from app.services.processing.extraction.provider import ProviderResponse
 
 logger = logging.getLogger("app.extraction")
 
@@ -189,6 +190,11 @@ class ExtractionService:
             return await self._mark_failed(
                 extraction_id, document_id, code="EXTRACTION_FAILED", message=_GENERIC_FAILURE
             )
+
+        if isinstance(produced, ProviderResponse):
+            if produced.raw_response is not None:
+                raw_response = dict(produced.raw_response)
+            produced = produced.payload
 
         try:
             # Revalidate model instances too. Pydantic's ``model_construct`` and

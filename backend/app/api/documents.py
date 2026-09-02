@@ -6,6 +6,7 @@ Stage 2 endpoints:
 * ``GET    /documents``                  list metadata, newest first
 * ``GET    /documents/{document_id}``     one document's metadata
 * ``GET    /documents/{document_id}/file`` stream the stored PDF
+* ``DELETE /documents/{document_id}``     remove the record and stored PDF
 
 Internal filesystem paths (``file_location``) and the file hash are never part of
 any response.
@@ -167,6 +168,26 @@ async def get_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Document:
     return await _get_or_404(db, document_id)
+
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a document and its stored PDF",
+)
+async def delete_document(
+    document_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    storage: Annotated[LocalFileStorage, Depends(get_storage)],
+) -> None:
+    document = await _get_or_404(db, document_id)
+
+    # Commit the database deletion first. A storage cleanup failure can leave an
+    # inaccessible orphan to clean up later, while deleting the file first could
+    # leave a live document record pointing at a file that no longer exists.
+    await db.delete(document)
+    await db.commit()
+    await storage.delete(document_id)
 
 
 @router.get(
