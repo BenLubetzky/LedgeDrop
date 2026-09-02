@@ -93,8 +93,13 @@ def storage(tmp_path) -> LocalFileStorage:
 
 
 @pytest_asyncio.fixture
-async def client(session_factory, storage) -> AsyncIterator[AsyncClient]:
-    app = create_app()
+def app(session_factory, storage):
+    """A FastAPI app wired to the test database session and throwaway storage.
+
+    Tests that need to swap another dependency (for example ``get_extractor``)
+    depend on this fixture and mutate ``app.dependency_overrides`` directly.
+    """
+    application = create_app()
 
     async def _override_get_db() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
@@ -106,8 +111,13 @@ async def client(session_factory, storage) -> AsyncIterator[AsyncClient]:
             else:
                 await session.commit()
 
-    app.dependency_overrides[get_db] = _override_get_db
-    app.dependency_overrides[get_storage] = lambda: storage
+    application.dependency_overrides[get_db] = _override_get_db
+    application.dependency_overrides[get_storage] = lambda: storage
+    return application
+
+
+@pytest_asyncio.fixture
+async def client(app) -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as http_client:
         yield http_client

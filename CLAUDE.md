@@ -37,9 +37,36 @@ persistence columns, preprocessing steps, provider-evaluation criteria, API
 paths, required tests) is in `docs/stage-3-extraction.md`; read it before
 implementing.
 
-Stage 3 progress: step 1 (extraction data contract) is complete —
-`backend/app/schemas/extraction.py`, tested in
-`backend/tests/test_extraction_contract.py`.
+Stage 3 progress: steps 1–10 are complete. The extraction data contract
+(`backend/app/schemas/extraction.py`), the persistence models
+(`backend/app/models/extraction.py`) and their Alembic migration
+(`0002_invoice_extraction_tables`), the backend schemas
+(`extraction_persistence.py`, `extraction_api.py`), the repository/service
+foundation and processing lifecycle
+(`backend/app/services/processing/extraction/`: `lifecycle.py`,
+`repository.py`, `service.py`), the extraction API endpoints
+(`backend/app/api/extractions.py`: `POST`/`GET` under
+`/documents/{id}/extractions[...]`), provider-independent PDF preprocessing
+(`preprocessing.py`, wired before the provider on start and retry), the
+provider boundary (`provider.py`: `ExtractionProvider` interface +
+`ProviderError` hierarchy) with a deterministic offline `FakeExtractionProvider`
+(`fake.py`, `FakeBehavior` = SUCCESS/MALFORMED/TIMEOUT/RATE_LIMITED/ERROR), and
+the synthetic evaluation dataset (`backend/evaluation/`: `expected.json` ground
+truth, `generate_invoices.py`, `dataset.py`). `ExtractionService.start` /
+`.retry` drive `UPLOADED|FAILED -> PROCESSING -> COMPLETED|FAILED`. Tests:
+`test_extraction_contract.py`, `test_extraction_model.py`,
+`test_extraction_schemas.py`, `test_extraction_service.py`,
+`test_extractions_api.py`, `test_extraction_preprocessing.py`,
+`test_fake_extraction_provider.py`, `test_eval_dataset.py`,
+`test_eval_scoring.py`. Step 11 has a provisional implementation target,
+documented in `docs/provider-selection.md`: Azure AI Document Intelligence
+`prebuilt-invoice`, with AWS Textract `AnalyzeExpense` as the live comparison.
+No real-provider benchmark has run yet, so production selection and confidence
+meaningfulness remain unvalidated. Application confidence stays `null` until a
+representative bake-off demonstrates calibration. The offline accuracy and
+confidence harness is `backend/evaluation/scoring.py`. Next is step 12: build
+the replaceable adapters, run the explicit live comparison, and record accuracy,
+line-item quality, latency, observed cost, and confidence calibration.
 
 ## Technology decisions
 
@@ -51,8 +78,10 @@ Stage 3 progress: step 1 (extraction data contract) is complete —
 - Development file storage: local filesystem
 - Production object storage: deferred
 - Overall architecture: modular monolith, not microservices
-- AI/extraction provider: not selected yet; make this decision before provider
-  integration and keep it behind a narrow interface
+- AI/extraction provider: Azure AI Document Intelligence `prebuilt-invoice` is
+  the provisional first adapter; AWS Textract `AnalyzeExpense` is the comparison
+  candidate. Final selection follows the live bake-off described in
+  `docs/provider-selection.md`. Both stay behind `ExtractionProvider`.
 - Monetary and quantity values: decimal arithmetic, never binary floating point
 
 ## Architectural overview

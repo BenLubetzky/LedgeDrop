@@ -1,0 +1,60 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 344 >>
+stream
+BT /F1 11 Tf 14 TL 72 720 Td
+(INVOICE) Tj T*
+(Invoice number: INV-3105) Tj T*
+(Invoice date: 2026-02-20) Tj T*
+(Due date: 2026-03-22) Tj T*
+(Vendor: Umbrella Supplies Ltd) Tj T*
+(Vendor tax ID: GB123456789) Tj T*
+(Bill to: Wayne Enterprises) Tj T*
+(Currency: GBP) Tj T*
+(Subtotal: 900.00) Tj T*
+(Tax: 180.00) Tj T*
+(Total due: 1080.00) Tj T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 264 >>
+stream
+BT /F1 11 Tf 14 TL 72 720 Td
+(Line items \(continued\):) Tj T*
+(  Rack units | qty 4 | unit 120.00 | line total 480.00) Tj T*
+(  Cabling kit | qty 2 | unit 60.00 | line total 120.00) Tj T*
+(  On-site installation | qty 3 | unit 100.00 | line total 300.00) Tj T*
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000317 00000 n 
+0000000712 00000 n 
+0000000838 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1153
+%%EOF

@@ -1,0 +1,46 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 434 >>
+stream
+BT /F1 11 Tf 14 TL 72 720 Td
+(INVOICE) Tj T*
+(Invoice number: INV-1001) Tj T*
+(Invoice date: 2026-01-15) Tj T*
+(Due date: 2026-02-14) Tj T*
+(Vendor: Northwind Traders GmbH) Tj T*
+(Vendor tax ID: DE811234567) Tj T*
+(Bill to: Contoso Ltd) Tj T*
+(Currency: EUR) Tj T*
+(Line items:) Tj T*
+(  Consulting services | qty 10 | unit 100.00 | line total 1000.00) Tj T*
+(Subtotal: 1000.00) Tj T*
+(Tax: 190.00) Tj T*
+(Total due: 1190.00) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000185 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+796
+%%EOF

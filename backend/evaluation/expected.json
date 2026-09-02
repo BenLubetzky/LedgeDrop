@@ -1,0 +1,170 @@
+[
+  {
+    "id": "digital_basic",
+    "file": "invoices/digital_basic.pdf",
+    "category": "digital",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "Single-page digitally generated invoice, every field present, one line item.",
+    "expected": {
+      "invoice_number": "INV-1001",
+      "invoice_date": "2026-01-15",
+      "due_date": "2026-02-14",
+      "vendor_name": "Northwind Traders GmbH",
+      "vendor_tax_id": "DE811234567",
+      "customer_name": "Contoso Ltd",
+      "currency": "EUR",
+      "subtotal": "1000.00",
+      "tax_amount": "190.00",
+      "total_amount": "1190.00",
+      "line_items": [
+        {"description": "Consulting services", "quantity": "10", "unit_price": "100.00", "line_total": "1000.00"}
+      ]
+    }
+  },
+  {
+    "id": "digital_multi_line_items",
+    "file": "invoices/digital_multi_line_items.pdf",
+    "category": "multi_line_items",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "Digital invoice with three line items; subtotal is their sum, 8% tax.",
+    "expected": {
+      "invoice_number": "INV-2042",
+      "invoice_date": "2026-03-02",
+      "due_date": "2026-04-01",
+      "vendor_name": "Globex Corporation",
+      "vendor_tax_id": "US99-1234567",
+      "customer_name": "Initech LLC",
+      "currency": "USD",
+      "subtotal": "435.00",
+      "tax_amount": "34.80",
+      "total_amount": "469.80",
+      "line_items": [
+        {"description": "Design workshop", "quantity": "2", "unit_price": "150.00", "line_total": "300.00"},
+        {"description": "Prototype revisions", "quantity": "3", "unit_price": "40.00", "line_total": "120.00"},
+        {"description": "Asset licensing", "quantity": "1", "unit_price": "15.00", "line_total": "15.00"}
+      ]
+    }
+  },
+  {
+    "id": "digital_multi_page",
+    "file": "invoices/digital_multi_page.pdf",
+    "category": "multi_page",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "Two-page invoice: header and totals on page 1, line items continue on page 2.",
+    "expected": {
+      "invoice_number": "INV-3105",
+      "invoice_date": "2026-02-20",
+      "due_date": "2026-03-22",
+      "vendor_name": "Umbrella Supplies Ltd",
+      "vendor_tax_id": "GB123456789",
+      "customer_name": "Wayne Enterprises",
+      "currency": "GBP",
+      "subtotal": "900.00",
+      "tax_amount": "180.00",
+      "total_amount": "1080.00",
+      "line_items": [
+        {"description": "Rack units", "quantity": "4", "unit_price": "120.00", "line_total": "480.00"},
+        {"description": "Cabling kit", "quantity": "2", "unit_price": "60.00", "line_total": "120.00"},
+        {"description": "On-site installation", "quantity": "3", "unit_price": "100.00", "line_total": "300.00"}
+      ]
+    }
+  },
+  {
+    "id": "digital_incomplete",
+    "file": "invoices/digital_incomplete.pdf",
+    "category": "incomplete",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "Genuine invoice missing optional fields: no due date, tax id, customer, subtotal or tax; the single line item has no quantity or unit price.",
+    "expected": {
+      "invoice_number": "INV-4200",
+      "invoice_date": "2026-01-30",
+      "due_date": null,
+      "vendor_name": "Acme Kft",
+      "vendor_tax_id": null,
+      "customer_name": null,
+      "currency": "EUR",
+      "subtotal": null,
+      "tax_amount": null,
+      "total_amount": "250.00",
+      "line_items": [
+        {"description": "Replacement parts", "quantity": null, "unit_price": null, "line_total": "250.00"}
+      ]
+    }
+  },
+  {
+    "id": "digital_unusual_layout",
+    "file": "invoices/digital_unusual_layout.pdf",
+    "category": "unusual_layout",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "Valid but unusual: slash-formatted number, dotted date, a non-date due term kept raw, and a right-to-left label order.",
+    "expected": {
+      "invoice_number": "2026/RE/0088",
+      "invoice_date": "30.06.2026",
+      "due_date": "on receipt",
+      "vendor_name": "Zenith Fabrication S.a r.l.",
+      "vendor_tax_id": "LU12345678",
+      "customer_name": "Hooli Inc",
+      "currency": "EUR",
+      "subtotal": "512.50",
+      "tax_amount": "97.38",
+      "total_amount": "609.88",
+      "line_items": [
+        {"description": "Custom bracket, anodised", "quantity": "25", "unit_price": "20.50", "line_total": "512.50"}
+      ]
+    }
+  },
+  {
+    "id": "scanned_no_text",
+    "file": "invoices/scanned_no_text.pdf",
+    "category": "scanned",
+    "is_invoice": true,
+    "readable": true,
+    "text_layer": "ABSENT",
+    "notes": "The known contents of a scanned invoice image. The PDF carries no text layer, so recovering these values requires OCR.",
+    "expected": {
+      "invoice_number": "INV-5501",
+      "invoice_date": "2026-04-11",
+      "due_date": "2026-05-11",
+      "vendor_name": "Cyberdyne Systems GmbH",
+      "vendor_tax_id": "DE327654321",
+      "customer_name": "Stark Industries",
+      "currency": "EUR",
+      "subtotal": "2000.00",
+      "tax_amount": "380.00",
+      "total_amount": "2380.00",
+      "line_items": [
+        {"description": "Servo actuators", "quantity": "8", "unit_price": "250.00", "line_total": "2000.00"}
+      ]
+    }
+  },
+  {
+    "id": "low_quality",
+    "file": "invoices/low_quality.pdf",
+    "category": "low_quality",
+    "is_invoice": true,
+    "readable": false,
+    "text_layer": "UNREADABLE",
+    "notes": "Truncated / corrupt bytes. Meant to be an invoice but cannot be parsed at all; preprocessing must reject it.",
+    "expected": null
+  },
+  {
+    "id": "not_an_invoice",
+    "file": "invoices/not_an_invoice.pdf",
+    "category": "not_invoice",
+    "is_invoice": false,
+    "readable": true,
+    "text_layer": "DIGITAL",
+    "notes": "A readable, digitally generated PDF that is plainly not an invoice (meeting notes).",
+    "expected": null
+  }
+]
