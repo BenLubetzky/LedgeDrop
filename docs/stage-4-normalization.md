@@ -376,6 +376,41 @@ Other requirements still in force:
 
 Test: `test_normalization_schemas.py`.
 
+## Field normalizers
+
+*(Done — step 6, covering steps 7–10.)*
+`app/services/processing/normalization/normalizers.py` holds the seven
+deterministic units; `iso4217.py` holds the vendored currency allow-list. Each
+function takes one raw value and returns a `NormResult` — exactly one of:
+`value` set (normalized), both `None` (absent: source was `None`/empty/blank —
+not a failure), or `error` set to a `FieldError(code, message)`. The functions
+carry no `field_path`; the step 11 engine attaches path and stringified
+`raw_value` to build the full `NormalizationError`.
+
+- `clean_text` — shared cleanup: NFC, all Unicode whitespace → space, strip
+  C0/C1 controls plus `U+200B`–`U+200D` and `U+FEFF`, collapse
+  spaces, trim. No case / accent / punctuation change.
+- `normalize_date` — year-first numeric, `D MON YYYY`, `MON D, YYYY`; ordinal
+  suffixes and one trailing period stripped first; all-numeric year-last
+  resolves day by the >12 rule and otherwise reads day-first; two-digit years,
+  unknown formats and impossible dates → `invalid_date`. Output `YYYY-MM-DD`.
+- `normalize_currency` — trim + upper-case, require `[A-Z]{3}`
+  (`invalid_currency` otherwise), require membership in
+  `APPROVED_CURRENCY_CODES` (`unknown_currency` otherwise).
+- `normalize_money` / `normalize_quantity` — a finite `Decimal` passes through
+  with sign and scale intact, never rounded; `NaN`/`Inf`/`bool`/`float` →
+  `invalid_number`; the string path applies the documented `.`-decimal /
+  `,`-or-space grouping policy, `()`/trailing-`-` negatives, and reports a
+  decimal comma as `ambiguous_number`.
+- `normalize_text(raw, *, max_length)` — `clean_text`, empty → absent,
+  over-length → `text_too_long` (never truncated).
+- `normalize_invoice_number` / `normalize_tax_id` — `normalize_text` at caps
+  100 / 60; internal spaces and separators kept.
+
+Caps `MAX_INVOICE_NUMBER` / `MAX_TAX_ID` / `MAX_PARTY_NAME` /
+`MAX_LINE_ITEM_DESCRIPTION` are asserted against the ORM `varchar` lengths.
+Test: `test_normalization_normalizers.py`.
+
 ## Processing orchestration and statuses
 
 ```text
@@ -462,18 +497,24 @@ step. Detail for each step is filled in as the step is worked.
    public response (`normalization_api.py`). Unknown keys rejected; decimals
    serialize as strings; the response carries no confidence or diagnostics.
    Test `test_normalization_schemas.py`.
-6. **Implement the deterministic normalizers.** Small units for dates,
-   currency, money, quantities, general text, invoice numbers, and tax
-   identifiers. Each returns a normalized value or a structured error and never
-   calls AI.
-7. **Implement date normalization.** Real-calendar validation; explicit
-   rejection of ambiguous numeric dates when locale is not established.
-8. **Implement currency normalization.** No defaulting, no conversion; ISO 4217
-   list check; deterministic symbol rules only.
-9. **Implement decimal normalization** for money and quantities using the
-   documented separator and precision policies.
-10. **Implement safe text normalization** while preserving identifier
-    semantics.
+6. **Implement the deterministic normalizers.** *(Done — see "Field
+   normalizers" above.)* `normalizers.py` + `iso4217.py`; the seven units each
+   return a `NormResult` (value / absent / `FieldError`); no AI. Test
+   `test_normalization_normalizers.py`.
+7. **Date normalization.** *(Done in step 6.)* `normalize_date` — real-calendar
+   validation via `datetime.date`; undetermined-order numeric dates read
+   day-first by policy (no `ambiguous_date`); two-digit years and unknown
+   formats → `invalid_date`.
+8. **Currency normalization.** *(Done in step 6.)* `normalize_currency` +
+   `APPROVED_CURRENCY_CODES` — no defaulting, no conversion, no symbol
+   interpretation; well-formed-but-unlisted → `unknown_currency`.
+9. **Decimal normalization.** *(Done in step 6.)* `normalize_money` /
+   `normalize_quantity` — finite `Decimal` passes through with sign and scale
+   intact, never rounded; string path follows the documented separator policy.
+10. **Safe text normalization.** *(Done in step 6.)* `clean_text` +
+    `normalize_text` / `normalize_invoice_number` / `normalize_tax_id` —
+    identifiers keep internal spaces; over-length is an error, never a
+    truncation.
 11. **Build the normalization repository/service and lifecycle.** Load a
     completed extraction, create an attempt, normalize all fields and line
     items, store values and errors transactionally, support explicit retry of

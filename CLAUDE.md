@@ -56,7 +56,8 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–5 are complete. Step 1 — the internal normalized
+Stage 4 progress: steps 1–6 are complete (step 6 also covers the step 7–10
+detail). Step 1 — the internal normalized
 invoice data contract in `backend/app/schemas/normalization.py`
 (`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
 `NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /
@@ -88,7 +89,15 @@ up/down/re-up on a throwaway database with seeded Stage 2/3 rows intact, and
 `normalization_api.py` (`NormalizationStartRequest`;
 `InvoiceNormalizationResult.from_attempt`, exposing status, timestamps,
 `extraction_id`, failure info and `data: NormalizedInvoice` — no confidence,
-no diagnostics); test `test_normalization_schemas.py`.
+no diagnostics); test `test_normalization_schemas.py`. Step 6 — the reusable
+deterministic field normalizers in
+`backend/app/services/processing/normalization/` (`normalizers.py`,
+`iso4217.py`): `normalize_date` / `_currency` / `_money` / `_quantity` /
+`_text` / `_invoice_number` / `_tax_id`, each returning a `NormResult` (value,
+clean absence, or a `FieldError` with a closed code + safe message); no AI, no
+I/O. Money/quantity `Decimal`s pass through with sign and scale intact.
+Currency checks the vendored `APPROVED_CURRENCY_CODES` allow-list. Test
+`test_normalization_normalizers.py`.
 
 ## Technology decisions
 
