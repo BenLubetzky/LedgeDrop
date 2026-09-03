@@ -49,32 +49,208 @@ A field-level normalization error is data about the invoice, not a technical
 attempt failure. Only infrastructure-level problems (database unavailable,
 source extraction unreadable, unexpected exception) make an attempt `FAILED`.
 
-## Policies to pin before implementation
+## Normalization policies (decided — step 2)
 
-Each policy below must be decided and written into this document before the
-step that depends on it is implemented. Do not silently invent policy in code.
+These policies are fixed. The step 6–10 normalizers implement exactly what is
+written here and must not add rules or guess beyond it. All processing is
+deterministic, in-process, and offline.
 
-- **Dates.** The exact set of accepted input formats; real-calendar validation;
-  how ambiguous numeric dates (e.g. `03/04/2026`) are handled when locale is
-  not established (expected: rejected with a structured error); output is
-  always `YYYY-MM-DD`.
-- **Numbers (money and quantities).** Accepted grouping and decimal separators;
-  how ambiguous separators are resolved or rejected; sign handling for
-  negatives; whether and when a precision/rounding rule applies (default: do
-  not round); representation of malformed or ambiguous numbers as errors.
-- **Currency.** The approved ISO 4217 code list; trim + upper-case behavior;
-  the explicit, deterministic rules (if any) for interpreting currency
-  symbols; missing currency is left `null` with no default.
-- **Whitespace and empty values.** Trimming rules; collapsing of repeated
-  internal whitespace; empty or whitespace-only values become `null`;
-  meaningful punctuation is preserved.
-- **Text limits.** Maximum stored length per text field and what happens on
-  overflow (truncate vs. error).
-- **Identifiers.** Invoice numbers and tax identifiers stay strings; which
-  normalization (if any) is applied beyond whitespace trimming.
-- **Failure representation.** The shape of a structured field error: stable
-  field path, raw value, safe error code, safe message. The closed set of
-  error codes.
+### Dates (`invoice_date`, `due_date`)
+
+Input is the raw extracted string. Before parsing: trim, collapse internal
+whitespace, drop a single trailing period, and remove an ordinal suffix on the
+day (`1st`, `2nd`, `3rd`, `15th`, … case-insensitive).
+
+Accepted input formats (English invoices):
+
+| Family | Examples | Interpreted as |
+|---|---|---|
+| Year-first, 4-digit year | `2026-01-15`, `2026/1/5`, `2026.01.15` | `YYYY-(M)M-(D)D` |
+| Day, English month name, 4-digit year | `15 Jan 2026`, `15 January 2026`, `15-Jan-2026` | D MON YYYY |
+| English month name, day, 4-digit year | `Jan 15, 2026`, `January 15 2026` | MON D YYYY |
+
+Month names are full or three-letter English, case-insensitive. One- or
+two-digit day and month are accepted in the year-first family and zero-padded
+on output.
+
+All-numeric dates with separators `/`, `-`, or `.` and a leading component of
+one or two digits (`03/04/2026`, `4-3-2026`):
+
+- If exactly one of the first two components is greater than 12, that component
+  is the day and the order is resolved (`13/04/2026` → 13 April 2026).
+- If both are 12 or less, the day/month order is not fixed by the value. It is
+  read using the **default field order, day-first (`DD/MM/YYYY`)**:
+  `03/04/2026` → 3 April 2026. This default is fixed Stage 4 policy and is
+  applied without recording an error. (A configurable per-source order may be
+  added later; until then every source is treated as day-first.)
+- If the day-first reading is not a real calendar date → `invalid_date`,
+  normalized value `null`.
+
+Rejected → `invalid_date`, normalized value `null`:
+
+- Two-digit years (`15/01/26`) — the century is not guessed.
+- Any format not listed above (localized or non-English month names, weekday
+  names, quarter/week notation, epoch numbers, `YYYYMMDD` with no separators).
+- Values that parse structurally but are not real calendar dates
+  (`2026-02-30`, `2026-13-01`, `0000-00-00`).
+
+No plausibility window is applied — a far-past or far-future but real date
+normalizes successfully; judging it belongs to Stage 5.
+
+Output: `YYYY-MM-DD`, zero-padded, proleptic Gregorian.
+
+### Numbers — money and quantities
+
+Fields: `subtotal`, `tax_amount`, `total_amount`, and line-item `quantity`,
+`unit_price`, `line_total`.
+
+By the time normalization runs these values have already been parsed into
+`Decimal` by the Stage 3 extraction contract
+(`app.schemas.extraction.Money` / `Quantity`), so normalization does **not**
+re-parse invoice number text in the current pipeline. Its number rules are:
+
+- Accept any finite `Decimal`. NaN and infinity are already impossible; if one
+  is somehow seen → `invalid_number`.
+- **Sign is preserved.** Negative amounts and quantities are valid (credits,
+  adjustments, returns) and pass through unchanged.
+- **No rounding and no quantization.** The exact value and scale from
+  extraction are kept, including trailing zeros. Aligning money to a currency's
+  minor unit is a later-stage concern.
+- A `None` value normalizes to `null` with no error.
+
+The following **string** parsing rules are the fixed policy for any numeric
+value that reaches normalization as text (a future provider, or a raw-response
+path). They are decided now so the behavior is not invented later:
+
+- Decimal separator: `.` (period) only.
+- Grouping separator: `,` (comma) or a space (incl. `U+00A0`, `U+202F`),
+  permitted only between digits in groups of exactly three.
+  `1,234,567.89` → `1234567.89`.
+- Leading/trailing whitespace and an embedded currency symbol or 3-letter code
+  are stripped before parsing (`$1,234.56`, `USD 1 234.56` → `1234.56`).
+- Accounting negatives: surrounding parentheses (`(123.45)`) and a trailing
+  minus (`123.45-`) both mean a negative value; a leading `+` is dropped.
+- A value using a decimal comma (`1234,56`, `1.234,56`) is **not** assumed to
+  be European — it is reported as `ambiguous_number`, normalized value `null`.
+- Anything not resolvable to a single finite decimal by these rules →
+  `invalid_number`, normalized value `null`.
+
+### Currency (`currency`)
+
+The extraction contract already guarantees this field is `null` or a
+three-letter alphabetic string, upper-cased. Normalization then:
+
+- Trims and upper-cases defensively (a no-op in practice).
+- Accepts the code only if it is on the approved list: the **current ISO 4217
+  alphabetic codes for circulating national currencies**, held as a vendored
+  in-repo constant (no network access). Multi-country codes such as `EUR`,
+  `XCD`, `XOF`, `XAF`, and `XPF` are included.
+- Rejects as `unknown_currency` (normalized value `null`) any well-formed code
+  not on the list: obsolete/withdrawn codes (`DEM`, `FRF`, `ITL`), the “no
+  currency” and testing codes (`XXX`, `XTS`), and precious-metal or
+  supranational codes (`XAU`, `XAG`, `XPT`, `XPD`, `XDR`, `XSU`, `XUA`,
+  `XBA`–`XBD`).
+- Reports a value that is not three alphabetic characters as
+  `invalid_currency` (should not occur given the contract, but the rule is
+  defined).
+
+A missing currency stays `null`. It is never defaulted and never inferred.
+
+### Currency-symbol interpretation
+
+There is **none** in Stage 4.
+
+- The `currency` field arrives from extraction as a code or `null`; a bare
+  symbol (`$`, `€`, `£`) cannot appear there (the contract forbids non-alpha).
+- A symbol found inside an amount string is stripped for parsing only and then
+  discarded; it never populates a missing `currency`.
+- Inferring currency from a symbol is ambiguous (`$` = USD/CAD/AUD/MXN/…) and
+  would be a form of defaulting, which Stage 4 forbids. Any currency-region
+  inference belongs to a later stage.
+
+### Text trimming and whitespace cleanup
+
+Fields: `invoice_number`, `vendor_name`, `vendor_tax_id`, `customer_name`,
+line-item `description`. Applied in this order:
+
+1. Apply Unicode normalization form **NFC**.
+2. Replace every Unicode whitespace character (tab, newline, no-break space
+   `U+00A0`, narrow no-break space `U+202F`, figure space `U+2007`, …) with a
+   plain space `U+0020`.
+3. Remove zero-width and BOM characters (`U+200B`–`U+200D`, `U+FEFF`) and
+   C0/C1 control characters.
+4. Collapse runs of spaces to one.
+5. Trim leading and trailing spaces.
+
+Not done: case changes, punctuation removal, accent/diacritic folding,
+transliteration, quote or dash normalization. `Café Müller & Co. (Ltd.)`
+survives verbatim except for whitespace. `description` becomes single-line
+(newlines became spaces in step 2).
+
+`invoice_number` and `vendor_tax_id` get the same whitespace cleanup and
+nothing else — internal spaces and separators (`INV 2026 / 0007`,
+`DE 123 456 789`) carry meaning and are not de-spaced, upper-cased, or
+reformatted.
+
+### Empty strings
+
+After the cleanup above, an empty result (`""`) — including a source value that
+was already `null`, `""`, or whitespace-only — normalizes to `null` with **no
+error**. An absent value is not a normalization failure.
+
+### Maximum normalized text lengths
+
+Measured in Unicode characters after cleanup:
+
+| Field | Limit |
+|---|---|
+| `invoice_number` | 100 |
+| `vendor_tax_id` | 60 |
+| `vendor_name`, `customer_name` | 256 |
+| line-item `description` | 512 |
+
+Over the limit → `text_too_long`, normalized value `null`. The value is
+**never silently truncated** — truncating an identifier or a party name
+corrupts data. The limits are generous; hitting one indicates bad extraction
+rather than a real invoice value.
+
+### Behavior when normalization fails
+
+Two separate kinds of failure:
+
+1. **Field-level normalization error** — the value is present but invalid or
+   ambiguous under the rules above. This is *data about the invoice*, not a
+   technical failure. The normalizer sets that field's normalized value to
+   `null`, appends one `NormalizationError` (`field_path`, `raw_value` = the
+   source value stringified, `code`, safe `message`), and continues with every
+   other field and line item. The attempt still ends **`COMPLETED`**, with a
+   non-empty `errors` list.
+2. **Technical failure** — the source extraction cannot be loaded or is not
+   `COMPLETED`, a database write fails, or the normalizer engine raises an
+   unexpected exception. The attempt ends **`FAILED`** with a safe
+   `failure_code` / `failure_message`; no partial normalized result is
+   persisted (the write is transactional); the source extraction and PDF are
+   untouched; an explicit retry is allowed.
+
+Closed set of field-error codes (this finalizes `NormalizationErrorCode` from
+step 1 at six members):
+
+| Code | Meaning |
+|---|---|
+| `invalid_date` | Not a real calendar date in an accepted format |
+| `invalid_currency` | Not a three-letter alphabetic token |
+| `unknown_currency` | Well-formed but not on the approved ISO 4217 list |
+| `invalid_number` | Not resolvable to a single finite decimal |
+| `ambiguous_number` | Decimal/grouping separators parseable more than one way |
+| `text_too_long` | Exceeds the field's maximum length |
+
+A numeric date with an undetermined day/month order is **not** in this set — it
+is resolved day-first by default (see "Dates" above), so there is no
+`ambiguous_date` code.
+
+Messages are fixed, generic, and client-safe — no paths, secrets, stack
+traces, or raw payloads — e.g. *“The invoice date could not be recognized in a
+supported format.”*
 
 ## Normalization contract
 
@@ -105,31 +281,54 @@ Rules:
 
 ## Normalization persistence
 
-Add normalization models linked to the Stage 3 extraction record. The exact
-table layout may be chosen during implementation, but it must preserve:
+*(Done — step 3, `backend/app/models/normalization.py`, test
+`test_normalization_model.py`.)* Three tables mirror the Stage 3 extraction
+layout (`invoice_extractions` / `invoice_line_items`):
 
-```text
-normalization_id
-extraction_id            (source Stage 3 attempt; immutable)
-status                   (PROCESSING | COMPLETED | FAILED)
-normalized scalar fields
-normalized line items
-structured field errors  (field path, raw value, error code, safe message)
-started_at
-completed_at
-failure_code             (technical failure only)
-failure_message          (safe)
-created_at
-updated_at
-```
+**`invoice_normalizations`** — one row per normalization attempt.
 
-Requirements:
+| Column | Type / rule |
+|---|---|
+| `normalization_id` | UUID PK |
+| `extraction_id` | FK → `invoice_extractions.extraction_id`, `ON DELETE CASCADE`; never written back to |
+| `attempt_number` | int ≥ 1; unique with `extraction_id` |
+| `status` | native enum `normalization_status` (`PROCESSING` / `COMPLETED` / `FAILED`) |
+| `started_at`, `completed_at` | timestamptz; `completed_at` null iff `PROCESSING` |
+| `failure_code` (≤64), `failure_message` | both set **only** when `status = FAILED` (technical failure) |
+| `created_at`, `updated_at` | timestamptz |
+| scalar fields | `invoice_number` varchar(100), `invoice_date`/`due_date` varchar(10), `vendor_name`/`customer_name` varchar(256), `vendor_tax_id` varchar(60), `currency` varchar(3), `subtotal`/`tax_amount`/`total_amount` numeric — all nullable, **no confidence column** |
 
-- Schema changes go through Alembic migrations; verify upgrade and downgrade
-  with existing Stage 2/Stage 3 data intact.
-- Foreign keys, constraints, and indexes enforce the link to the source
-  extraction, attempt history, and one active attempt per source extraction.
-- Stage 3 records stay immutable.
+CHECK constraints: `status_fields_consistent` (as Stage 3), `attempt_number >= 1`,
+`invoice_date` / `due_date` match `^\d{4}-\d{2}-\d{2}$` or null, `currency`
+matches `^[A-Z]{3}$` or null. Partial unique index
+`… one_active_per_extraction` on `extraction_id WHERE status = 'PROCESSING'`.
+
+**`invoice_normalized_line_items`** — `normalized_line_item_id` UUID PK;
+`normalization_id` FK (`CASCADE`); `position` int ≥ 0, unique with
+`normalization_id`; `description` varchar(512), `quantity` / `unit_price` /
+`line_total` numeric, all nullable; `created_at`. Order mirrors the source
+extraction's line items 1:1.
+
+**`invoice_normalization_errors`** — `normalization_error_id` UUID PK;
+`normalization_id` FK (`CASCADE`); `field_path` varchar(64) restricted to the
+ten scalar fields or a canonical `line_items.<index>.<line-item-field>` path,
+unique with `normalization_id` (one error per field path); `raw_value` text nullable
+(null only when the source value was null); `code` native enum
+`normalization_error_code` (the six members); `message` text (client-safe);
+`created_at`.
+
+`NormalizationErrorCode` is defined by `app.schemas.normalization` and reused
+by the persistence model. PostgreSQL stores its specified lower-case values,
+so the pure contract does not depend on the ORM and the two layers cannot drift
+into different closed sets. `ExtractionAttempt` gains a
+`normalizations` relationship (cascade delete, oldest attempt first); nothing
+in Stage 3 behaviour changes.
+
+Requirements still in force:
+
+- Schema changes go through Alembic migrations (step 4); verify upgrade and
+  downgrade with existing Stage 2/Stage 3 data intact.
+- Stage 3 rows stay immutable — normalization code only reads them.
 - Public responses never expose internal exceptions, paths, secrets, or raw
   internal diagnostics.
 
@@ -204,12 +403,17 @@ step. Detail for each step is filled in as the step is worked.
    upper-cased; ISO 4217 list check deferred to step 8), `NormalizedText`
    (trimmed, non-empty — an empty result must be `null`). Schema definition
    only; no AI, no database.
-2. **Document normalization policies.** Pin the dates, numbers, currencies,
-   whitespace, empty-value, text-limit, and failure-representation policies in
-   the "Policies to pin before implementation" section above.
-3. **Design normalization persistence models.** Attempts, normalized values,
-   normalized line items, errors, timestamps, status, and safe technical
-   failure information. Stage 3 records stay immutable.
+2. **Document normalization policies.** *(Done — see "Normalization policies
+   (decided — step 2)" above.)* Dates, numbers, currency, currency symbols,
+   whitespace, empty values, text limits, and failure representation are all
+   fixed there, and `NormalizationErrorCode` is finalized at six members.
+   Undetermined-order numeric dates are read day-first (`DD/MM/YYYY`) by
+   default rather than erroring.
+3. **Design normalization persistence models.** *(Done — see "Normalization
+   persistence" above.)* Three tables: `invoice_normalizations`,
+   `invoice_normalized_line_items`, `invoice_normalization_errors`. Attempt
+   history via `(extraction_id, attempt_number)`; one active attempt via a
+   partial unique index; Stage 3 rows untouched.
 4. **Create and verify the Alembic migration.** Foreign keys, constraints,
    indexes, upgrade/downgrade, attempt history, and one-active-run protection,
    without damaging existing data.

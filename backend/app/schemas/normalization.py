@@ -20,8 +20,10 @@ How it differs from the Stage 3 extraction contract
   when the value could not be normalized. The second case additionally records
   a :class:`NormalizationError` in :attr:`NormalizedInvoice.errors`.
 * Dates are canonical ``YYYY-MM-DD`` strings that denote a real calendar date.
-  Impossible or ambiguous source dates do not appear here; they become an
-  error instead.
+  An impossible source date (bad calendar values, unrecognized format) becomes
+  an ``invalid_date`` error with a ``null`` value. A numeric date whose
+  day/month order is not fixed by the value is read day-first (``DD/MM/YYYY``)
+  by default and is *not* an error.
 * Currency is a 3-letter alphabetic code, upper-cased. Whether the code is on
   the approved ISO 4217 list is enforced by the step 8 normalizer, not by this
   structural contract; a missing currency stays ``null`` and is never
@@ -134,18 +136,10 @@ NormalizedText = Annotated[str, AfterValidator(_require_non_empty_text)]
 
 # --- structured normalization errors -------------------------------------
 
-
 class NormalizationErrorCode(str, Enum):
-    """Closed set of normalization error codes.
-
-    This starter set covers the categories in ``docs/stage-4-normalization.md``.
-    Step 2 (policy documentation) finalizes the authoritative list before the
-    normalizers in step 6 are written; adding a member is a schema edit, not a
-    migration.
-    """
+    """Closed set of field-level normalization error codes, finalized in step 2."""
 
     INVALID_DATE = "invalid_date"
-    AMBIGUOUS_DATE = "ambiguous_date"
     INVALID_CURRENCY = "invalid_currency"
     UNKNOWN_CURRENCY = "unknown_currency"
     INVALID_NUMBER = "invalid_number"

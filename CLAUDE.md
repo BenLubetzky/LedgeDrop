@@ -56,14 +56,29 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: step 1 is complete. The internal normalized invoice data
-contract is `backend/app/schemas/normalization.py` (`NormalizedInvoice`,
-`NormalizedLineItem`, `NormalizationError` / `NormalizationErrorCode`,
-`NormalizedInvoiceResult`, plus the `NormalizedDate` / `NormalizedCurrencyCode`
-/ `NormalizedText` leaf types); test `test_normalization_contract.py`.
-Normalized fields hold a single canonical value or `null` and carry no
-confidence. A structured error records `field_path`, `raw_value`, `code`, and a
-client-safe `message`.
+Stage 4 progress: steps 1–3 are complete. Step 1 — the internal normalized
+invoice data contract in `backend/app/schemas/normalization.py`
+(`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
+`NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /
+`NormalizedCurrencyCode` / `NormalizedText` leaf types); test
+`test_normalization_contract.py`. Normalized fields hold a single canonical
+value or `null` and carry no confidence; a structured error records
+`field_path`, `raw_value`, `code`, and a client-safe `message`. Step 2 — the
+normalization policies (dates, numbers, currency, currency symbols, whitespace,
+empty values, text limits, failure behavior) are decided and written in
+`docs/stage-4-normalization.md`; `NormalizationErrorCode` is finalized at six
+members, and numeric dates with an undetermined day/month order are read
+day-first (`DD/MM/YYYY`) by default rather than erroring. Money and quantities
+arrive from Stage 3 already parsed to `Decimal`, so normalization preserves
+sign and scale without rounding rather than re-parsing number text. Step 3 —
+the persistence models in `backend/app/models/normalization.py`
+(`NormalizationAttempt`, `NormalizationLineItem`, `NormalizationFieldError`,
+plus the `NormalizationStatus` / `NormalizationErrorCode` enums): tables
+`invoice_normalizations`, `invoice_normalized_line_items`,
+`invoice_normalization_errors`, keyed `(extraction_id, attempt_number)` with a
+partial unique index for one active attempt; `ExtractionAttempt` gains a
+`normalizations` relationship; test `test_normalization_model.py`. No Alembic
+migration yet (step 4).
 
 ## Technology decisions
 
@@ -153,8 +168,10 @@ Do not broaden input support to images or other file types.
   traceable normalized result. Raw extraction values and the original PDF stay
   unchanged. Normalization is deterministic with no AI or external-network
   call.
-- Valid dates become `YYYY-MM-DD`; impossible or ambiguous dates produce a
-  structured field error, not a guessed value.
+- Valid dates become `YYYY-MM-DD`. Impossible or unrecognized dates produce an
+  `invalid_date` error with a `null` value; a numeric date whose day/month
+  order is not fixed by its digits is read day-first (`DD/MM/YYYY`) by default,
+  not treated as an error.
 - Currency codes are trimmed, upper-cased, and checked against an approved ISO
   4217 list. Symbols are interpreted only under explicit deterministic rules.
   Missing currency is not defaulted; foreign currency is not converted.

@@ -46,6 +46,7 @@ from app.database.base import Base
 
 if TYPE_CHECKING:
     from app.models.document import Document
+    from app.models.normalization import NormalizationAttempt
 
 
 def _utcnow() -> datetime:
@@ -215,6 +216,14 @@ class ExtractionAttempt(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="ExtractionLineItem.position",
+    )
+    # Stage 4 normalization attempts derived from this extraction, oldest first.
+    # Added in Stage 4; does not affect any Stage 3 behaviour.
+    normalizations: Mapped[list[NormalizationAttempt]] = relationship(
+        back_populates="source_extraction",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="NormalizationAttempt.attempt_number",
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
