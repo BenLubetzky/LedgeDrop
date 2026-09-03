@@ -56,7 +56,23 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–10 are complete; the deterministic field normalizers
+Stage 4 progress: steps 1–11 are complete. Step 11 — the normalization engine,
+repository, lifecycle, and service in
+`backend/app/services/processing/normalization/` (`engine.py`, `repository.py`,
+`lifecycle.py`, `service.py`; test `test_normalization_service.py`):
+`normalize_extraction` runs the step 6–10 normalizers over every scalar field
+and line item, attaching a stable `field_path` + stringified `raw_value` to
+each field error; `NormalizationService.start` / `retry` lock the source
+extraction row, commit a `PROCESSING` attempt before the engine runs, then
+persist normalized values, line items, and errors and mark `COMPLETED` in one
+transaction. A field-level error never fails the attempt; only an engine
+exception or a persistence failure does, rolling back to a `FAILED` attempt
+with a generic `NORMALIZATION_FAILED` reason and no partial result. Illegal or
+concurrent starts return `409` (`EXTRACTION_NOT_COMPLETED`,
+`NORMALIZATION_IN_PROGRESS`, `EXTRACTION_ALREADY_NORMALIZED`,
+`NORMALIZATION_FAILED`, `NORMALIZATION_NOT_FAILED`); an unknown extraction is
+`404`. The source extraction, document row, and PDF are never modified.
+Steps 6–10 — the deterministic field normalizers
 in `backend/app/services/processing/normalization/` are done and heavily
 regression-tested (`test_normalization_normalizers.py`). Each normalizer
 applies only the input cleanup its policy permits — currency and numbers do NOT

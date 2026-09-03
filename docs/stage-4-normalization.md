@@ -555,10 +555,33 @@ step. Detail for each step is filled in as the step is worked.
     non-`str` text raises rather than being stringified into a fabricated value;
     the lifecycle service treats that unexpected exception as a technical
     failure. Regression tests cover these.
-11. **Build the normalization repository/service and lifecycle.** Load a
-    completed extraction, create an attempt, normalize all fields and line
-    items, store values and errors transactionally, support explicit retry of
-    technical failures, and reject concurrent or illegal starts.
+11. **Build the normalization repository/service and lifecycle.** *(Done —
+    `backend/app/services/processing/normalization/` `engine.py`,
+    `repository.py`, `lifecycle.py`, `service.py`; test
+    `test_normalization_service.py`.)* `normalize_extraction` maps a validated
+    `InvoiceExtraction` onto `NormalizedInvoice` by running the step 6–10
+    normalizers over every scalar field and line item, attaching a stable
+    `field_path` and the stringified `raw_value` to each field error; it is
+    total over the contract (a module-level assert pins the field sets) and
+    re-validates the assembled result. `NormalizationRepository` is the only
+    reader/writer of the three normalization tables and owns no transaction
+    boundary; `apply_result` goes through the step 5 persistence bridge.
+    `NormalizationService.start` / `retry` lock the source `invoice_extractions`
+    row `FOR UPDATE`, gate on `lifecycle.ensure_extraction_can_normalize`
+    (source must be `COMPLETED`; `EXTRACTION_NOT_COMPLETED` /
+    `NORMALIZATION_IN_PROGRESS` / `EXTRACTION_ALREADY_NORMALIZED` /
+    `NORMALIZATION_FAILED` / `NORMALIZATION_NOT_FAILED` `409`s;
+    `EXTRACTION_NOT_FOUND` `404`), commit the `PROCESSING` attempt before the
+    engine runs, then persist values + line items + errors and mark
+    `COMPLETED` in one transaction. A field-level error never fails the
+    attempt; only an engine exception or a persistence failure does, and it
+    rolls back to a `FAILED` attempt carrying a generic client-safe
+    `NORMALIZATION_FAILED` / message with no partial result and the source
+    extraction, document row, and PDF untouched. Retry of a `FAILED` attempt
+    creates `attempt_number + 1`; earlier attempts are immutable. The partial
+    unique index backs the `FOR UPDATE` serialization for concurrent starts
+    (`IntegrityError` → `409`). No AI or network call occurs (a test blocks
+    `httpx` and the run still completes).
 12. **Add the API endpoints.** Start normalization; retrieve latest or specific
     attempt; retry and history where useful. Clear `404` and `409` responses.
 13. **Connect the pipeline** as `upload -> extraction -> normalization`, keeping
