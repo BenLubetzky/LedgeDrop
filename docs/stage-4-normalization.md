@@ -501,10 +501,19 @@ step. Detail for each step is filled in as the step is worked.
    normalizers" above.)* `normalizers.py` + `iso4217.py`; the seven units each
    return a `NormResult` (value / absent / `FieldError`); no AI. Test
    `test_normalization_normalizers.py`.
-7. **Date normalization.** *(Done in step 6.)* `normalize_date` — real-calendar
-   validation via `datetime.date`; undetermined-order numeric dates read
-   day-first by policy (no `ambiguous_date`); two-digit years and unknown
-   formats → `invalid_date`.
+7. **Date normalization.** *(Done — `normalize_date`, step 6/7.)* Every parse
+   is checked against the real calendar with `datetime.date`, so `31/02/2026`,
+   `Feb 30, 2026`, `29/02/2026` (non-leap) and `2026-13-01` all fail on both
+   the numeric and month-name paths. All-numeric year-last dates resolve the
+   day by the >12 rule and otherwise read day-first (`DD/MM/YYYY`) — a fixed
+   default applied to every source, not locale inference, and never an error
+   (there is no `ambiguous_date` code). Two-digit years, `YYYYMMDD`, datetime
+   strings, weekday/quarter notation, non-English or 4-letter month
+   abbreviations, mixed separators, year 0, and a non-`str` input all →
+   `invalid_date`; ordinal suffixes are removed only from the actual day token
+   and must agree with its number. Date preprocessing does not apply the wider
+   text-cleanup policy. `None`/blank → absent. The Stage 3 raw string is untouched.
+   Regression tests in `test_normalization_normalizers.py` cover these.
 8. **Currency normalization.** *(Done in step 6.)* `normalize_currency` +
    `APPROVED_CURRENCY_CODES` — no defaulting, no conversion, no symbol
    interpretation; well-formed-but-unlisted → `unknown_currency`.

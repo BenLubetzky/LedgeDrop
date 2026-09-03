@@ -213,27 +213,59 @@ def test_money_unparseable_string_is_invalid_number_or_absent(raw: str) -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
+        # year-first numeric, every accepted separator, 1-2 digit month/day
         ("2026-01-15", "2026-01-15"),
         ("2026/1/5", "2026-01-05"),
         ("2026.01.15", "2026-01-15"),
+        ("2026-1-1", "2026-01-01"),
+        # English month-name forms
         ("15 Jan 2026", "2026-01-15"),
         ("15 January 2026", "2026-01-15"),
         ("15-Jan-2026", "2026-01-15"),
+        ("15 JANUARY 2026", "2026-01-15"),
         ("Jan 15, 2026", "2026-01-15"),
         ("January 15 2026", "2026-01-15"),
+        ("5 May 2026", "2026-05-05"),
+        # ordinal suffixes, case, trailing period, commas
         ("1st Feb 2026", "2026-02-01"),
         ("15th January 2026.", "2026-01-15"),
-        ("13/04/2026", "2026-04-13"),  # 13 > 12 -> day resolved
+        ("AUGUST 1ST, 2026", "2026-08-01"),
+        # surrounding / internal whitespace
+        ("  2026-01-15  ", "2026-01-15"),
+        ("2026-01-15\n", "2026-01-15"),
+        ("15 Jan 2026", "2026-01-15"),
+        # all-numeric year-last: order resolved by the >12 rule
+        ("13/04/2026", "2026-04-13"),
         ("04/13/2026", "2026-04-13"),
-        ("03/04/2026", "2026-04-03"),  # both <= 12 -> day-first default
+        ("15/1/2026", "2026-01-15"),
+        ("1/15/2026", "2026-01-15"),
+        ("12/13/2026", "2026-12-13"),
+        ("13/12/2026", "2026-12-13"),
+        # all-numeric year-last: order undetermined -> day-first default
+        ("03/04/2026", "2026-04-03"),
         ("4-3-2026", "2026-03-04"),
+        ("1.2.2026", "2026-02-01"),
+        # real calendar edge: leap day in a leap year, both paths
+        ("29/02/2024", "2024-02-29"),
+        ("February 29, 2024", "2024-02-29"),
+        # no plausibility window - far past / future real dates pass
+        ("2099-12-31", "2099-12-31"),
+        ("0001-01-01", "0001-01-01"),
     ],
 )
 def test_date_supported_formats(raw: str, expected: str) -> None:
     assert _val(normalize_date(raw)) == expected
 
 
-@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_date_ambiguous_numeric_is_read_day_first_not_errored() -> None:
+    # 03/04/2026: both components <= 12. Policy fixes this to day-first for
+    # every source (not locale inference); it is a value, never an error.
+    result = normalize_date("03/04/2026")
+    assert result.error is None
+    assert result.value == "2026-04-03"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "\t\n"])
 def test_date_absent_is_null_without_error(raw) -> None:
     result = normalize_date(raw)
     assert result.value is None and result.error is None
@@ -242,25 +274,61 @@ def test_date_absent_is_null_without_error(raw) -> None:
 @pytest.mark.parametrize(
     "raw",
     [
-        "15/01/26",          # two-digit year
-        "2026-02-30",        # impossible day
+        # impossible calendar dates - numeric paths
+        "31/02/2026",        # the canonical example: 31 is the day, Feb has 28
+        "2026-02-30",
+        "2026-02-31",
         "2026-13-01",        # impossible month
+        "2026-00-10",        # zero month
+        "2026-01-00",        # zero day
+        "00/01/2026",
+        "0/0/2026",
+        "29/02/2026",        # 2026 is not a leap year
+        "2026-02-29",
+        # impossible calendar dates - month-name paths
+        "Feb 30, 2026",
+        "April 31, 2026",
+        "February 29, 2026",
+        # order genuinely unresolvable
         "13/13/2026",        # both > 12
+        # two-digit years - the century is not guessed
+        "15/01/26",
+        "1/1/26",
+        # unrecognized formats
         "20260115",          # no separators
+        "2026-01-15T00:00:00",   # datetime, not a date
         "Q1 2026",           # quarter notation
+        "3rd Quarter 2026",
+        "Wednesday 15 2026",  # weekday
         "Montag 15 2026",    # non-English weekday
         "15 Januar 2026",    # non-English month
-        "sometime in 2026",  # free text
+        "15 Janvier 2026",
+        "Sept 15 2026",      # 4-letter abbreviation (policy: full or 3-letter)
+        "15/Jan/2026",       # month name with slash separators
+        "Jan. 15, 2026",     # internal period is not stripped
+        "2026th-01-15",      # ordinal suffix is on the year, not the day
+        "2026-01st-15",      # ordinal suffix is on the month, not the day
+        "01st/15/2026",      # 15 resolves as day; suffix is on the month
+        "11st Jan 2026",     # malformed ordinal suffix
         "2026-01/15",        # mixed separators
         "15 Jan-2026",       # mixed separators
-        "Sept 15 2026",      # month names are full or exactly 3 letters
-        "Jan. 15, 2026",     # only one trailing period is stripped
+        "March 2026",        # month + year, no day
+        "sometime in 2026",  # free text
+        "2026",              # bare year
+        "0000-01-01",        # year zero is not a real date
         "٢٠٢٦-٠١-١٥",        # non-ASCII digits are outside the listed formats
+        "2026\u200b-01-15",  # date preprocessing does not delete format chars
     ],
 )
 def test_date_rejected_inputs_are_invalid_date(raw: str) -> None:
     assert _code(normalize_date(raw)) is EC.INVALID_DATE
 
 
-def test_date_far_future_but_real_is_accepted() -> None:
-    assert _val(normalize_date("2099-12-31")) == "2099-12-31"
+@pytest.mark.parametrize("raw", [20260115, 20260115.0, ("2026", "01", "15"), b"2026-01-15"])
+def test_date_non_string_input_is_a_field_error_not_a_crash(raw) -> None:
+    assert _code(normalize_date(raw)) is EC.INVALID_DATE
+
+
+def test_date_normalizer_never_returns_none() -> None:
+    for raw in ("2026-01-15", "31/02/2026", "garbage", "", None, 5):
+        assert isinstance(normalize_date(raw), type(normalize_date("2026-01-15")))

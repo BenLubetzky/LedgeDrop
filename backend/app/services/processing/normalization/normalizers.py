@@ -297,7 +297,9 @@ _MONTHS: dict[str, int] = {
     "dec": 12, "december": 12,
 }
 
-_ORDINAL_RE = re.compile(r"(?<=[0-9])(st|nd|rd|th)\b", re.IGNORECASE)
+_ORDINAL_TOKEN_RE = re.compile(
+    r"(?<![0-9])([0-9]{1,2})(st|nd|rd|th)\b", re.IGNORECASE
+)
 _YEAR_FIRST_RE = re.compile(r"([0-9]{4})([-/.])([0-9]{1,2})\2([0-9]{1,2})")
 _NUMERIC_YEAR_LAST_RE = re.compile(
     r"([0-9]{1,2})([-/.])([0-9]{1,2})\2([0-9]{4})"
@@ -309,6 +311,50 @@ _DAY_MONTH_YEAR_RE = re.compile(
 _MONTH_DAY_YEAR_RE = re.compile(
     r"([A-Za-z]{3,9})\s+([0-9]{1,2}),?\s+([0-9]{4})"
 )
+
+
+def _clean_date_input(raw: str) -> str:
+    """Apply only the date policy's trim and whitespace-collapse rules."""
+    return " ".join(raw.split())
+
+
+def _ordinal_suffix(day: int) -> str:
+    if 10 < day % 100 < 14:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _strip_day_ordinal(raw: str) -> str | None:
+    """Strip one valid ordinal suffix only when attached to the day token."""
+    matches = list(_ORDINAL_TOKEN_RE.finditer(raw))
+    if not matches:
+        return raw
+    if len(matches) != 1:
+        return None
+
+    ordinal = matches[0]
+    day = int(ordinal[1])
+    if ordinal[2].lower() != _ordinal_suffix(day):
+        return None
+
+    candidate = raw[: ordinal.start(2)] + raw[ordinal.end(2) :]
+    numeric_tokens = list(re.finditer(r"[0-9]+", raw))
+    ordinal_token_index = next(
+        (index for index, token in enumerate(numeric_tokens) if token.start() == ordinal.start(1)),
+        None,
+    )
+
+    if _YEAR_FIRST_RE.fullmatch(candidate):
+        expected_day_index = 2
+    elif (numeric_match := _NUMERIC_YEAR_LAST_RE.fullmatch(candidate)) is not None:
+        first, second = int(numeric_match[1]), int(numeric_match[3])
+        expected_day_index = 1 if second > 12 and first <= 12 else 0
+    elif _DAY_MONTH_YEAR_RE.fullmatch(candidate) or _MONTH_DAY_YEAR_RE.fullmatch(candidate):
+        expected_day_index = 0
+    else:
+        return None
+
+    return candidate if ordinal_token_index == expected_day_index else None
 
 
 def _bad_date() -> NormResult:
@@ -329,22 +375,38 @@ def normalize_date(raw: str | None) -> NormResult:
     """Parse a raw date string into canonical ``YYYY-MM-DD``.
 
     Accepts year-first numeric (`2026/1/5`), English month-name forms
-    (`15 Jan 2026`, `January 15, 2026`), and all-numeric year-last dates. An
-    all-numeric date whose day/month order is not fixed by the digits is read
-    day-first (`DD/MM/YYYY`) - that is policy, not an error. Two-digit years,
-    unrecognized formats, and impossible calendar dates all fail as
-    ``invalid_date``.
+    (`15 Jan 2026`, `January 15, 2026`), and all-numeric year-last dates. Every
+    parse is checked against the real calendar with :class:`datetime.date`, so
+    ``31/02/2026``, ``Feb 30, 2026`` and ``29/02/2026`` (non-leap) all fail.
+
+    Order resolution for all-numeric year-last dates:
+
+    * if exactly one of the first two components is > 12 it is the day;
+    * otherwise the order is undetermined and the date is read **day-first**
+      (`DD/MM/YYYY`). This is a fixed policy default applied identically to
+      every source - it is *not* locale inference and records no error.
+
+    Two-digit years, unrecognized formats, weekday/quarter notation, and
+    impossible calendar dates all fail as ``invalid_date``. A ``None`` or
+    blank input is absent (no value, no error). The Stage 3 raw string is
+    never modified.
     """
     if raw is None:
         return _ABSENT
-    s = clean_text(raw)
+    if not isinstance(raw, str):
+        # The contract guarantees str | None; anything else is malformed
+        # upstream. Surface it as a field error, never crash the attempt.
+        return _bad_date()
+    s = _clean_date_input(raw)
     if not s:
         return _ABSENT
 
     if s.endswith("."):
         s = s[:-1].strip()
-    s = _ORDINAL_RE.sub("", s)
-    s = re.sub(r"\s+", " ", s).strip()
+    stripped = _strip_day_ordinal(s)
+    if stripped is None:
+        return _bad_date()
+    s = stripped
 
     m = _YEAR_FIRST_RE.fullmatch(s)
     if m:

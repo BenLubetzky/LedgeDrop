@@ -56,8 +56,8 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–6 are complete (step 6 also covers the step 7–10
-detail). Step 1 — the internal normalized
+Stage 4 progress: steps 1–7 are complete (steps 8–10 detail also lands in the
+step 6 normalizers). Step 1 — the internal normalized
 invoice data contract in `backend/app/schemas/normalization.py`
 (`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
 `NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /
