@@ -56,8 +56,17 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–7 are complete (steps 8–10 detail also lands in the
-step 6 normalizers). Step 1 — the internal normalized
+Stage 4 progress: steps 1–10 are complete; the deterministic field normalizers
+in `backend/app/services/processing/normalization/` are done and heavily
+regression-tested (`test_normalization_normalizers.py`). Each normalizer
+applies only the input cleanup its policy permits — currency and numbers do NOT
+use the broad `clean_text`, so hidden zero-width / control characters make a
+value a field error rather than being silently repaired; `clean_text` (for
+names / descriptions / identifiers) removes only the characters the text policy
+names. Contract-invalid non-`str` text raises instead of being silently
+stringified, allowing the lifecycle service to record a technical failure.
+Step 1 — the internal
+normalized
 invoice data contract in `backend/app/schemas/normalization.py`
 (`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
 `NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /

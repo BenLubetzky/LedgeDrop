@@ -99,15 +99,24 @@ _REMOVED_FORMAT_CHARS = frozenset(chr(codepoint) for codepoint in range(0x200B, 
 
 
 def clean_text(raw: str) -> str:
-    """Trim, collapse whitespace, and strip invisible characters.
+    """The shared text cleanup for the free-text and identifier fields.
 
-    Order (per policy): NFC normalize; every Unicode whitespace character (tab,
-    newline, no-break / narrow-no-break / figure space, line and paragraph
-    separators) becomes a plain space; the remaining control and format
-    characters (C0/C1 controls, zero-width joiners, BOM, bidi marks, soft
-    hyphen) are removed; runs of spaces collapse to one; the ends are trimmed.
+    Exactly the five steps of the text policy in
+    ``docs/stage-4-normalization.md`` and nothing more:
 
-    Case, punctuation, accents, quotes and dashes are left exactly as they are.
+    1. NFC normalize.
+    2. Every Unicode whitespace character (tab, newline, no-break / narrow /
+       figure space, line and paragraph separators, …) becomes a plain space.
+    3. Remove the zero-width and BOM characters the policy names
+       (``U+200B``-``U+200D``, ``U+FEFF``) and C0/C1 control characters.
+    4. Collapse runs of spaces to one.
+    5. Trim the ends.
+
+    Deliberately **not** removed: other format characters the policy does not
+    name - word joiner (``U+2060``), bidi marks (``U+200E``/``U+200F``,
+    ``U+202A``-``U+202E``), soft hyphen (``U+00AD``). They survive so a value
+    that carries them is not silently "repaired". Case, punctuation, accents,
+    quotes and dashes are also left exactly as they are.
     """
     normalized = unicodedata.normalize("NFC", raw)
     out: list[str] = []
@@ -125,14 +134,30 @@ def clean_text(raw: str) -> str:
 
 
 def normalize_text(raw: str | None, *, max_length: int) -> NormResult:
-    """Clean general free text; empty becomes absent; over-length is an error.
+    """Clean general free text: trim, fold whitespace, drop the named invisible
+    characters, collapse repeated spaces.
 
-    Used for vendor / customer names and line-item descriptions. The value is
-    never truncated - a value over ``max_length`` is a ``text_too_long``
-    failure so bad extraction is surfaced rather than silently corrupted.
+    * ``None``, empty, or whitespace-only -> **absent** (value ``None``, no
+      error). An absent value is not a failure.
+    * Longer than ``max_length`` characters (measured *after* cleanup) ->
+      ``text_too_long``. The value is **never truncated** - silently shortening
+      a name or an identifier corrupts data, so bad extraction is surfaced
+      instead.
+    * Otherwise the cleaned string is returned. Case, punctuation, accents,
+      digits and symbols are preserved verbatim; nothing is parsed or
+      re-typed.
+
+    Used for `vendor_name`, `customer_name`, line-item `description`, and (via
+    the wrappers below) the identifier fields.
     """
     if raw is None:
         return _ABSENT
+    if not isinstance(raw, str):
+        # Stage 3 guarantees str | None. Silently stringifying a contract-
+        # invalid object could persist an invented identifier (for example,
+        # b"INV-1" becoming "b'INV-1'"). Let the service classify this
+        # upstream contract violation as a technical failure instead.
+        raise TypeError("text normalization requires a string or None")
     cleaned = clean_text(raw)
     if not cleaned:
         return _ABSENT
@@ -145,35 +170,64 @@ def normalize_text(raw: str | None, *, max_length: int) -> NormResult:
 
 
 def normalize_invoice_number(raw: str | None) -> NormResult:
-    """Invoice number: whitespace cleanup only. Internal spaces and separators
-    (`INV 2026 / 0007`) are meaningful and preserved; it stays a string."""
+    """Invoice number: the shared whitespace cleanup and nothing else. Internal
+    spaces and separators (`INV 2026 / 0007`) carry meaning and are preserved;
+    the value stays a string - it is never parsed to a number or stripped of
+    leading zeros (`007` stays `007`)."""
     return normalize_text(raw, max_length=MAX_INVOICE_NUMBER)
 
 
 def normalize_tax_id(raw: str | None) -> NormResult:
-    """Tax identifier: whitespace cleanup only (`DE 123 456 789` is preserved)."""
+    """Tax identifier: the shared whitespace cleanup and nothing else
+    (`DE 123 456 789` keeps its groups). It stays a string and is never
+    re-typed, re-cased, or reformatted."""
     return normalize_text(raw, max_length=MAX_TAX_ID)
 
 
 # --- currency --------------------------------------------------------
 
-_ALPHA3_RE = re.compile(r"[A-Z]{3}")
+# Exactly three ASCII letters. Checked on the trimmed string *before*
+# upper-casing so a non-ASCII letter whose upper-case is longer (e.g. "ß" ->
+# "SS") can never widen a two-character junk value into a 3-letter "code".
+# The currency policy allows only trimming and upper-casing - NOT the wider
+# `clean_text` cleanup - so a hidden zero-width or control character inside the
+# value leaves it non-matching here and is reported, not silently repaired.
+_CURRENCY_CODE_RE = re.compile(r"[A-Za-z]{3}")
 
 
 def normalize_currency(raw: str | None) -> NormResult:
-    """Trim + upper-case, then require a three-letter code on the approved
-    ISO 4217 allow-list. Missing currency stays absent - never defaulted, never
-    inferred from a symbol (Stage 4 does no currency-symbol interpretation)."""
+    """Trim, require exactly three ASCII letters, upper-case, then require
+    membership in the approved ISO 4217 allow-list
+    (:data:`APPROVED_CURRENCY_CODES`).
+
+    * A missing / blank currency is **absent** - never defaulted to `EUR` or
+      anything else (there is no configuration switch for that), and never
+      inferred from a currency symbol: Stage 4 does no symbol interpretation
+      because no unambiguous rule exists for it.
+    * A value that is not three ASCII letters -> ``invalid_currency``.
+    * A well-formed code that is not on the allow-list (obsolete, withdrawn,
+      precious-metal, supranational, or "no currency" codes) ->
+      ``unknown_currency``.
+    * No currency conversion is ever performed.
+    """
     if raw is None:
         return _ABSENT
-    code = clean_text(raw).upper()
-    if not code:
-        return _ABSENT
-    if not _ALPHA3_RE.fullmatch(code):
+    if not isinstance(raw, str):
+        # The contract guarantees str | None; anything else is malformed
+        # upstream. Surface it as a field error, never crash the attempt.
         return _fail(
             NormalizationErrorCode.INVALID_CURRENCY,
             "This is not a valid three-letter currency code.",
         )
+    cleaned = raw.strip()
+    if not cleaned:
+        return _ABSENT
+    if not _CURRENCY_CODE_RE.fullmatch(cleaned):
+        return _fail(
+            NormalizationErrorCode.INVALID_CURRENCY,
+            "This is not a valid three-letter currency code.",
+        )
+    code = cleaned.upper()
     if code not in APPROVED_CURRENCY_CODES:
         return _fail(
             NormalizationErrorCode.UNKNOWN_CURRENCY,
@@ -189,7 +243,6 @@ def normalize_currency(raw: str | None) -> NormResult:
 # preserves sign and scale (no rounding). The string path implements the
 # documented separator policy for any future provider that hands over text.
 
-_CURRENCY_SYMBOLS = "$€£¥₹₽₩₪₫₴₦₱฿₲₡₸₺؋"
 _PLAIN_NUMBER_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 _COMMA_GROUPED_RE = re.compile(r"[0-9]{1,3}(,[0-9]{3})+(\.[0-9]+)?")
 _SPACE_GROUPED_RE = re.compile(r"[0-9]{1,3}( [0-9]{3})+(\.[0-9]+)?")
@@ -197,13 +250,41 @@ _DECIMAL_COMMA_RE = re.compile(
     r"(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+|[0-9]{1,3}(?: [0-9]{3})+),[0-9]+"
 )
 
+# The two no-break space variants the number policy accepts as a grouping
+# separator, folded to a plain ASCII space. This is the *only* character
+# substitution the number path performs.
+_GROUPING_SPACES = str.maketrans({" ": " ", " ": " "})
+
 
 def _invalid_number(kind: str) -> NormResult:
     return _fail(NormalizationErrorCode.INVALID_NUMBER, f"This {kind} is not a valid number.")
 
 
+def _strip_currency_symbols(value: str) -> str:
+    """Remove Unicode currency-symbol affixes, but never symbols within digits."""
+    start = 0
+    end = len(value)
+    while start < end and (
+        value[start].isspace() or unicodedata.category(value[start]) == "Sc"
+    ):
+        start += 1
+    while end > start and (
+        value[end - 1].isspace() or unicodedata.category(value[end - 1]) == "Sc"
+    ):
+        end -= 1
+    return value[start:end].strip()
+
+
 def _parse_decimal_string(raw: str, *, kind: str) -> NormResult:
-    s = clean_text(raw)
+    # The number policy allows exactly two clean-ups: the no-break space
+    # variants that may be used for grouping are folded to a plain space, and
+    # leading / trailing whitespace is trimmed. Nothing else is stripped or
+    # collapsed - a zero-width, control, or repeated whitespace character left
+    # inside the value makes it malformed (``invalid_number``), never silently
+    # repaired. (Do not swap this for ``clean_text``: that would quietly fix
+    # hidden characters the currency policy already forbids fixing, and the
+    # number policy is the same in spirit.)
+    s = raw.translate(_GROUPING_SPACES).strip()
     if not s:
         return _ABSENT
 
@@ -226,7 +307,7 @@ def _parse_decimal_string(raw: str, *, kind: str) -> NormResult:
     # strip an embedded 3-letter code and any leading/trailing currency symbol
     s = re.sub(r"^[A-Za-z]{3}\b\s*", "", s)
     s = re.sub(r"\s*\b[A-Za-z]{3}$", "", s)
-    s = s.strip(_CURRENCY_SYMBOLS + " ").strip()
+    s = _strip_currency_symbols(s)
 
     if not s:
         return _invalid_number(kind)
@@ -251,7 +332,10 @@ def _parse_decimal_string(raw: str, *, kind: str) -> NormResult:
         return _invalid_number(kind)
     if not dec.is_finite():
         return _invalid_number(kind)
-    return _ok(-dec if negative else dec)
+    # ``-dec`` applies the active Decimal context and can round a high-precision
+    # value. ``copy_negate`` changes only the sign and preserves coefficient and
+    # exponent exactly, as required by the no-rounding policy.
+    return _ok(dec.copy_negate() if negative else dec)
 
 
 def _normalize_decimal(raw: object | None, *, kind: str) -> NormResult:

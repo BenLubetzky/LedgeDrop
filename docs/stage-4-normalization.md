@@ -514,16 +514,47 @@ step. Detail for each step is filled in as the step is worked.
    and must agree with its number. Date preprocessing does not apply the wider
    text-cleanup policy. `None`/blank → absent. The Stage 3 raw string is untouched.
    Regression tests in `test_normalization_normalizers.py` cover these.
-8. **Currency normalization.** *(Done in step 6.)* `normalize_currency` +
-   `APPROVED_CURRENCY_CODES` — no defaulting, no conversion, no symbol
-   interpretation; well-formed-but-unlisted → `unknown_currency`.
-9. **Decimal normalization.** *(Done in step 6.)* `normalize_money` /
-   `normalize_quantity` — finite `Decimal` passes through with sign and scale
-   intact, never rounded; string path follows the documented separator policy.
-10. **Safe text normalization.** *(Done in step 6.)* `clean_text` +
-    `normalize_text` / `normalize_invoice_number` / `normalize_tax_id` —
-    identifiers keep internal spaces; over-length is an error, never a
-    truncation.
+8. **Currency normalization.** *(Done — `normalize_currency` +
+   `APPROVED_CURRENCY_CODES`, step 6/8.)* Trim only, then require exactly
+   three ASCII letters **before** upper-casing (so `ß`→`SS` and ligatures
+   cannot widen junk into a code), then upper-case, then require membership in
+   the vendored allow-list. Missing/blank → absent, never defaulted to `EUR`
+   (no config switch exists) and never inferred from a symbol — Stage 4 does
+   no symbol interpretation because no unambiguous rule exists. Not three ASCII
+   letters (`$`, `978`, `EURO`, full-width `ＥＵＲ`, or a non-`str`) →
+   `invalid_currency`; well-formed but obsolete/withdrawn/metal/supranational
+   /"no currency" → `unknown_currency`. No conversion, ever. The allow-list is
+   a hand-maintained snapshot (ISO 4217 through 2026-01-01) treating `BGN`,
+   `ANG`, `SLL`, `ZWL` as withdrawn. Regression tests cover these.
+9. **Decimal normalization.** *(Done — `normalize_money` / `normalize_quantity`,
+   step 6/9.)* A finite `Decimal` passes through with sign and scale intact —
+   never rounded or quantized. `float` is rejected outright (`invalid_number`),
+   not coerced, so binary floating point never enters the pipeline. `None` →
+   absent; non-finite / wrong-type → `invalid_number`. The string path (future
+   providers) does the **minimal** clean-up the policy allows: fold `U+00A0` /
+   `U+202F` to a plain space, trim the ends — and nothing else. It does not run
+   `clean_text`: a zero-width, control, or repeated whitespace character left
+   inside a number makes it `invalid_number`, never a silently-repaired value.
+   Grouping is `,` or single space in groups of three; `.` is the only decimal
+   separator; a decimal comma → `ambiguous_number`; scientific notation, bare
+   `.5`, `5.`, wrong group sizes → `invalid_number`. `(123.45)` and `123.45-`
+   are negative. Unicode currency-symbol (`Sc`) affixes are discarded.
+   Regression tests cover these.
+10. **Safe text normalization.** *(Done — `clean_text` + `normalize_text` /
+    `normalize_invoice_number` / `normalize_tax_id`, step 6/10.)* `clean_text`
+    is exactly the five policy steps: NFC, all Unicode whitespace → space,
+    remove only `U+200B`–`U+200D` / `U+FEFF` / C0-C1 controls, collapse space
+    runs, trim. Format characters the policy does not name (word joiner, bidi
+    marks, soft hyphen) are **kept**, not silently repaired. `None` / empty /
+    whitespace-only / invisible-only → absent (no error). Over `max_length`
+    *after* cleanup → `text_too_long`, never truncated. Case, punctuation,
+    accents, quotes, dashes, digits and symbols are preserved verbatim.
+    Identifiers get the same cleanup and nothing else — internal single spaces
+    and separators kept (`DE 123 456 789`), repeated spaces collapsed, leading
+    zeros kept (`007` stays `007`), never parsed to a number. Contract-invalid
+    non-`str` text raises rather than being stringified into a fabricated value;
+    the lifecycle service treats that unexpected exception as a technical
+    failure. Regression tests cover these.
 11. **Build the normalization repository/service and lifecycle.** Load a
     completed extraction, create an attempt, normalize all fields and line
     items, store values and errors transactionally, support explicit retry of

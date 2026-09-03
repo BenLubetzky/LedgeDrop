@@ -5,7 +5,7 @@ Pure functions - no database, no AI, no network.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -110,38 +110,148 @@ def test_identifier_caps_differ() -> None:
     assert _val(normalize_tax_id("1" * MAX_TAX_ID)) == "1" * MAX_TAX_ID
 
 
-# --- currency ------------------------------------------------------
-
-
-@pytest.mark.parametrize("raw", ["EUR", " eur ", "Usd"])
-def test_currency_trims_and_upper_cases_known_codes(raw: str) -> None:
-    assert _val(normalize_currency(raw)) in APPROVED_CURRENCY_CODES
-
-
-@pytest.mark.parametrize("raw", [None, "", "   "])
-def test_currency_absent_is_null_without_error(raw) -> None:
-    result = normalize_currency(raw)
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "   ", "\t\n", "  ", "​﻿"],
+)
+def test_text_empty_or_whitespace_or_invisible_only_is_absent(raw) -> None:
+    result = normalize_text(raw, max_length=MAX_PARTY_NAME)
     assert result.value is None and result.error is None
 
 
-@pytest.mark.parametrize("raw", ["EU", "EURO", "E U", "12", "$"])
-def test_currency_malformed_is_invalid_currency(raw: str) -> None:
+def test_text_collapses_repeated_internal_whitespace() -> None:
+    assert _val(normalize_text("Acme   \t  GmbH", max_length=MAX_PARTY_NAME)) == "Acme GmbH"
+
+
+def test_text_description_becomes_single_line() -> None:
+    assert _val(normalize_text("Widget\n  blue\r\n  size L", max_length=MAX_LINE_ITEM_DESCRIPTION)) == "Widget blue size L"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Acme, Inc. (DE) — Süd/West & Partner",
+        "Müller’s “Best” Co.",
+        "50% off / net-30",
+    ],
+)
+def test_text_preserves_meaningful_punctuation_verbatim(value: str) -> None:
+    assert _val(normalize_text(value, max_length=MAX_PARTY_NAME)) == value
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "INV-2026/0007",
+        "007",                 # leading zeros kept, not parsed
+        "1,234",               # comma kept, not stripped
+        "1.000",               # not read as a number
+        "-42",                 # not read as a negative number
+        "2026-0001",
+        "DE123456789A",
+        "GB 12 3456 78",
+    ],
+)
+def test_identifier_is_returned_verbatim_as_a_string(raw: str) -> None:
+    result = normalize_invoice_number(raw)
+    assert result.value == raw
+    assert isinstance(result.value, str)
+
+
+def test_identifier_collapses_repeated_spaces_but_keeps_single_ones() -> None:
+    assert _val(normalize_tax_id("DE  123   456  789")) == "DE 123 456 789"
+
+
+@pytest.mark.parametrize("fn", [normalize_invoice_number, normalize_tax_id])
+def test_identifier_blank_is_absent(fn) -> None:
+    for raw in (None, "", "   ", " "):
+        result = fn(raw)
+        assert result.value is None and result.error is None
+
+
+@pytest.mark.parametrize("raw", [123, 4.5, ("a", "b"), b"INV-1"])
+def test_text_non_string_input_is_a_technical_error(raw) -> None:
+    with pytest.raises(TypeError, match="requires a string or None"):
+        normalize_text(raw, max_length=MAX_PARTY_NAME)
+
+
+def test_text_length_is_measured_after_cleanup() -> None:
+    # exactly the cap, plus whitespace that trims/collapses away -> accepted
+    padded = "x" * MAX_PARTY_NAME + "   \t\n   "
+    assert _val(normalize_text(padded, max_length=MAX_PARTY_NAME)) == "x" * MAX_PARTY_NAME
+    # one real char over the cap, even with collapsible whitespace -> error
+    over = "y y" + "z" * MAX_PARTY_NAME  # collapses to 1 + 1 + 1 + cap = cap + 2
+    assert _code(normalize_text(over, max_length=MAX_PARTY_NAME)) is EC.TEXT_TOO_LONG
+
+
+# --- currency ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("EUR", "EUR"),
+        ("eur", "EUR"),
+        (" eur ", "EUR"),
+        ("Usd", "USD"),
+        ("uSd", "USD"),
+        (" jpy ", "JPY"),   # no-break space trimmed
+    ],
+)
+def test_currency_trims_upper_cases_and_returns_the_canonical_code(raw: str, expected: str) -> None:
+    result = normalize_currency(raw)
+    assert result.value == expected and result.error is None
+    assert expected in APPROVED_CURRENCY_CODES
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "\t\n"])
+def test_currency_absent_is_null_without_error_and_is_not_defaulted(raw) -> None:
+    result = normalize_currency(raw)
+    assert result.value is None and result.error is None  # never defaulted to EUR
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "EU", "EURO", "E U R", "US$", "12", "978",   # numeric ISO code, not alphabetic
+        "$", "€", "£", "¥", "US $",                  # symbols are not interpreted
+        "EUR.", "E.U.R", "eu r",
+        "E​UR", "​GBP﻿",                             # no text-field cleanup
+        "ＥＵＲ",                                      # full-width letters are not ASCII
+        "ßd",                                        # upper-case would widen to "SSD" - rejected before upper
+    ],
+)
+def test_currency_not_three_ascii_letters_is_invalid_currency(raw: str) -> None:
     assert _code(normalize_currency(raw)) is EC.INVALID_CURRENCY
 
 
-@pytest.mark.parametrize("raw", ["DEM", "FRF", "XXX", "XAU", "XDR", "ZZZ"])
+@pytest.mark.parametrize("raw", [123, 978, 3.5, b"EUR", ["EUR"]])
+def test_currency_non_string_input_is_a_field_error_not_a_crash(raw) -> None:
+    assert _code(normalize_currency(raw)) is EC.INVALID_CURRENCY
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["DEM", "FRF", "ITL", "ESP", "XXX", "XTS", "XAU", "XAG", "XDR", "XSU", "ZZZ", "QQQ"],
+)
 def test_currency_well_formed_but_not_approved_is_unknown_currency(raw: str) -> None:
-    assert _code(normalize_currency(raw)) is EC.UNKNOWN_CURRENCY
+    result = normalize_currency(raw)
+    assert result.value is None
+    assert _code(result) is EC.UNKNOWN_CURRENCY
 
 
-def test_currency_allow_list_excludes_metals_and_test_codes() -> None:
-    for excluded in ("XAU", "XAG", "XPT", "XPD", "XXX", "XTS", "XDR", "XSU", "XUA"):
+def test_currency_allow_list_shape_and_key_members() -> None:
+    # every entry is exactly three upper-case ASCII letters
+    assert all(len(c) == 3 and c.isascii() and c.isalpha() and c.isupper() for c in APPROVED_CURRENCY_CODES)
+    for excluded in ("XAU", "XAG", "XPT", "XPD", "XXX", "XTS", "XDR", "XSU", "XUA", "XBA", "XBB"):
         assert excluded not in APPROVED_CURRENCY_CODES
-    for kept in ("EUR", "USD", "GBP", "XAF", "XCD", "XOF", "XPF"):
+    for kept in ("EUR", "USD", "GBP", "JPY", "CHF", "XAF", "XCD", "XOF", "XPF"):
         assert kept in APPROVED_CURRENCY_CODES
 
 
 def test_currency_allow_list_excludes_withdrawn_codes() -> None:
+    # BGN/ANG/SLL/ZWL treated as withdrawn (replaced by EUR/XCG/SLE/ZWG) per
+    # the vendored snapshot; confirm against the eval set before relying on this.
     for withdrawn in ("ANG", "BGN", "SLL", "ZWL"):
         assert withdrawn not in APPROVED_CURRENCY_CODES
         assert _code(normalize_currency(withdrawn)) is EC.UNKNOWN_CURRENCY
@@ -172,39 +282,99 @@ def test_money_integer_object_is_not_an_accepted_decimal_input() -> None:
     assert _code(normalize_money(123)) is EC.INVALID_NUMBER
 
 
+def test_decimal_is_never_rounded_or_quantized() -> None:
+    # exact value and scale kept, no minor-unit alignment
+    assert str(_val(normalize_money(Decimal("1.005")))) == "1.005"
+    assert str(_val(normalize_money(Decimal("2.500")))) == "2.500"
+    assert str(_val(normalize_quantity(Decimal("0.333333333333")))) == "0.333333333333"
+    assert _val(normalize_money(Decimal("-0"))) == Decimal("0")
+
+
+def test_string_negation_does_not_apply_decimal_context_rounding() -> None:
+    raw_digits = "1234567890123456789012345678901234567890.00"
+    with localcontext() as context:
+        context.prec = 10
+        result = _val(normalize_money(f"-{raw_digits}"))
+
+    assert str(result) == f"-{raw_digits}"
+
+
+def test_float_is_rejected_never_coerced() -> None:
+    # binary floating point never enters the pipeline, even via str()
+    assert _code(normalize_money(1234.56)) is EC.INVALID_NUMBER
+    assert _code(normalize_quantity(0.1)) is EC.INVALID_NUMBER
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
+        ("1234.56", Decimal("1234.56")),
         ("1,234.56", Decimal("1234.56")),
         ("1,234", Decimal("1234")),
         ("1,234,567.89", Decimal("1234567.89")),
-        ("1 234.56", Decimal("1234.56")),
+        ("1 234.56", Decimal("1234.56")),            # ASCII space grouping
+        ("1 234 567.89", Decimal("1234567.89")),  # no-break space grouping
+        ("1 234.56", Decimal("1234.56")),       # narrow no-break space grouping
         ("$1,234.56", Decimal("1234.56")),
+        ("₭1,234.56", Decimal("1234.56")),
+        ("1234.56 ₮", Decimal("1234.56")),
+        ("₿ 0.125", Decimal("0.125")),
         ("USD 1 234.56", Decimal("1234.56")),
+        ("1234.56 EUR", Decimal("1234.56")),
+        ("  1234.56  ", Decimal("1234.56")),         # leading/trailing trim
         ("(123.45)", Decimal("-123.45")),
         ("123.45-", Decimal("-123.45")),
+        ("-123.45", Decimal("-123.45")),
         ("+99", Decimal("99")),
+        ("0", Decimal("0")),
     ],
 )
 def test_money_string_parsing_follows_the_documented_policy(raw: str, expected: Decimal) -> None:
     assert _val(normalize_money(raw)) == expected
 
 
-@pytest.mark.parametrize("raw", ["1234,56", "1.234,56", "1 234,56"])
+@pytest.mark.parametrize("raw", ["1234,56", "1.234,56", "1 234,56", "12,34"])
 def test_money_decimal_comma_is_ambiguous_number(raw: str) -> None:
     assert _code(normalize_money(raw)) is EC.AMBIGUOUS_NUMBER
 
 
 @pytest.mark.parametrize(
     "raw",
-    ["1,23,456", "12.34.56", "12 34", "1,234 567", "-123-", "abc", "1..2", ""],
+    [
+        "1,23,456",      # non-3 grouping
+        "1,2345.67",     # wrong group size
+        "12.34.56",      # two decimal points
+        "1..2",
+        "12 34",         # 2-digit "group"
+        "1  234.56",     # repeated space is NOT collapsed
+        "1\t234.56",     # tab is not a grouping separator
+        "1​234.56", # zero-width space inside is not stripped -> malformed
+        "1﻿234",    # BOM inside is not stripped -> malformed
+        "1,234 567",
+        "-123-",
+        "(-123)",
+        "1e5",           # scientific notation is not a documented format
+        ".5",            # bare leading dot
+        "5.",            # trailing dot
+        "USD",           # a code with no number
+        "abc",
+    ],
 )
-def test_money_unparseable_string_is_invalid_number_or_absent(raw: str) -> None:
+def test_money_malformed_string_is_invalid_number(raw: str) -> None:
+    assert _code(normalize_money(raw)) is EC.INVALID_NUMBER
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\t", " "])
+def test_money_blank_string_is_absent_without_error(raw: str) -> None:
     result = normalize_money(raw)
-    if raw == "":
-        assert result.value is None and result.error is None
-    else:
-        assert _code(result) is EC.INVALID_NUMBER
+    assert result.value is None and result.error is None
+
+
+def test_money_and_quantity_share_the_same_rules() -> None:
+    for fn in (normalize_money, normalize_quantity):
+        assert _val(fn("1 234.5")) == Decimal("1234.5")
+        assert _code(fn("1,23,456")) is EC.INVALID_NUMBER
+        assert _code(fn("1.234,56")) is EC.AMBIGUOUS_NUMBER
 
 
 # --- dates -------------------------------------------------------
