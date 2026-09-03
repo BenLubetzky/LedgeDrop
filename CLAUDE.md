@@ -13,64 +13,48 @@ document types unless they directly help the invoice MVP.
 
 ## Current project state
 
-**Stage 2 (upload foundation) is complete.**
+**Stage 2 (upload foundation): complete.** FastAPI backend with environment
+config, async PostgreSQL, SQLAlchemy, Alembic, consistent API errors, health
+endpoints, and local file storage. Endpoints `POST /documents`, `GET /documents`,
+`GET /documents/{id}`, `GET /documents/{id}/file`. Server-authoritative PDF
+validation (one PDF per request, readable, ≤ 20 MB, ≤ 10 pages), SHA-256 hashing,
+atomic storage, PostgreSQL metadata, cleanup on failure. Next.js + TypeScript
+frontend with drag/drop upload, client-side checks, progress feedback, and a
+document list. Accepted documents stay `UPLOADED` until processing runs.
 
-- FastAPI backend: environment-based config, async PostgreSQL, SQLAlchemy,
-  Alembic, consistent API errors, health endpoints, local file storage.
-- Endpoints: `POST /documents`, `GET /documents`, `GET /documents/{id}`,
-  `GET /documents/{id}/file`.
-- Server-authoritative PDF validation (one PDF per request, readable content,
-  ≤ 20 MB, ≤ 10 pages), SHA-256 hashing, atomic storage, PostgreSQL metadata,
-  cleanup when storage or database persistence fails.
-- Next.js + TypeScript frontend: drag/drop upload, client-side PDF and size
-  checks, progress and feedback, document list with statuses, links to view
-  originals.
-- Backend test suite green (41 tests at the Stage 2 checkpoint).
+**Stage 3 (structured invoice extraction): complete.** Converts a stored PDF
+into schema-constrained invoice data with per-field confidence when the provider
+supplies it. Full spec in `docs/stage-3-extraction.md`; provider rationale in
+`docs/provider-selection.md`. Key code:
 
-Accepted documents stay in `UPLOADED` until real processing begins.
+- Contract: `backend/app/schemas/extraction.py`
+- Persistence: `backend/app/models/extraction.py`; migration
+  `0002_invoice_extraction_tables`
+- Schemas: `backend/app/schemas/extraction_persistence.py`, `extraction_api.py`
+- Service/lifecycle: `backend/app/services/processing/extraction/`
+  (`lifecycle.py`, `repository.py`, `service.py`); drives
+  `UPLOADED|FAILED -> PROCESSING -> COMPLETED|FAILED`
+- API: `backend/app/api/extractions.py` (`POST`/`GET` under
+  `/documents/{id}/extractions[...]`)
+- Preprocessing: `backend/app/services/processing/extraction/preprocessing.py`
+- Provider boundary: `provider.py` (`ExtractionProvider` + `ProviderError`
+  hierarchy); offline `FakeExtractionProvider` in `fake.py`; real adapter
+  `OpenAIExtractionProvider` in `openai_provider.py` (OpenAI GPT-5-mini).
+  `EXTRACTION_PROVIDER=openai|fake` selects it in `app/api/deps.py` (`fake` by
+  default). GPT-5-mini supplies no calibrated per-field confidence, so
+  application confidence is `null` for every field.
+- Evaluation: `backend/evaluation/` (`expected.json`, `generate_invoices.py`,
+  `dataset.py`, `scoring.py`)
 
-**The authorized next stage is Stage 3: structured invoice extraction** —
-convert a stored PDF into schema-constrained invoice data with a per-field
-confidence value. Stage 3 does not implement normalization, business validation,
-escalation decisions, or human review. The full specification (field contract,
-persistence columns, preprocessing steps, provider-evaluation criteria, API
-paths, required tests) is in `docs/stage-3-extraction.md`; read it before
-implementing.
-
-Stage 3 progress: steps 1–12 are complete. The extraction data contract
-(`backend/app/schemas/extraction.py`), the persistence models
-(`backend/app/models/extraction.py`) and their Alembic migration
-(`0002_invoice_extraction_tables`), the backend schemas
-(`extraction_persistence.py`, `extraction_api.py`), the repository/service
-foundation and processing lifecycle
-(`backend/app/services/processing/extraction/`: `lifecycle.py`,
-`repository.py`, `service.py`), the extraction API endpoints
-(`backend/app/api/extractions.py`: `POST`/`GET` under
-`/documents/{id}/extractions[...]`), provider-independent PDF preprocessing
-(`preprocessing.py`, wired before the provider on start and retry), the
-provider boundary (`provider.py`: `ExtractionProvider` interface +
-`ProviderError` hierarchy) with a deterministic offline `FakeExtractionProvider`
-(`fake.py`, `FakeBehavior` = SUCCESS/MALFORMED/TIMEOUT/RATE_LIMITED/ERROR), and
-the synthetic evaluation dataset (`backend/evaluation/`: `expected.json` ground
-truth, `generate_invoices.py`, `dataset.py`). `ExtractionService.start` /
-`.retry` drive `UPLOADED|FAILED -> PROCESSING -> COMPLETED|FAILED`. Tests:
-`test_extraction_contract.py`, `test_extraction_model.py`,
-`test_extraction_schemas.py`, `test_extraction_service.py`,
-`test_extractions_api.py`, `test_extraction_preprocessing.py`,
-`test_fake_extraction_provider.py`, `test_eval_dataset.py`,
-`test_eval_scoring.py`. The offline accuracy and confidence harness is
-`backend/evaluation/scoring.py`.
-
-Step 12 (the real provider) is integrated: OpenAI GPT-5-mini, behind the same
-`ExtractionProvider` interface, in `openai_provider.py`
-(`OpenAIExtractionProvider`; test: `test_openai_extraction_provider.py`), with
-`EXTRACTION_PROVIDER=openai|fake` selecting it in `app/api/deps.py` (`fake` by
-default). This was a deliberate deviation from the step 11 Azure/AWS bake-off
-plan — GPT-5-mini was selected without running that comparison, with Azure
-kept as a candidate for a later migration. GPT-5-mini has no calibrated
-per-field confidence, so the adapter never asks for one: application
-confidence stays `null` unconditionally for every field, not just until a
-bake-off runs. Full rationale in `docs/provider-selection.md`.
+**Stage 4 (normalization): authorized, current stage.** Stage 4 converts the
+raw, immutable output of a completed Stage 3 extraction into separate canonical
+values where normalization is deterministic, and records structured field errors
+where a value is invalid or ambiguous. It makes no AI or external-network call.
+It does not implement business validation, confidence thresholds, totals
+reconciliation, duplicate decisions, acceptance/rejection, escalation, or human
+review. Full specification — contract, policies to pin, persistence layout, API
+scope, 14-step implementation order, verification list — is in
+`docs/stage-4-normalization.md`; read it before implementing.
 
 ## Technology decisions
 
@@ -82,10 +66,10 @@ bake-off runs. Full rationale in `docs/provider-selection.md`.
 - Development file storage: local filesystem
 - Production object storage: deferred
 - Overall architecture: modular monolith, not microservices
-- AI/extraction provider: Azure AI Document Intelligence `prebuilt-invoice` is
-  the provisional first adapter; AWS Textract `AnalyzeExpense` is the comparison
-  candidate. Final selection follows the live bake-off described in
-  `docs/provider-selection.md`. Both stay behind `ExtractionProvider`.
+- AI/extraction provider: OpenAI GPT-5-mini is the current adapter, behind the
+  `ExtractionProvider` interface. Azure AI Document Intelligence
+  `prebuilt-invoice` is kept as a future migration candidate. Rationale and the
+  superseded Azure/AWS bake-off plan are in `docs/provider-selection.md`.
 - Monetary and quantity values: decimal arithmetic, never binary floating point
 
 ## Architectural overview
@@ -95,15 +79,15 @@ Browser -> Next.js frontend -> FastAPI document API
    |-- PostgreSQL metadata and extraction records
    |-- Local original-PDF storage
    `-- Processing pipeline
-       |-- Extraction             <- Stage 3
-       |-- Normalization          <- later
+       |-- Extraction             <- Stage 3 (done)
+       |-- Normalization          <- Stage 4 (current)
        |-- Validation             <- later
        `-- Decision / escalation  <- later
 ```
 
-Extraction must be a separate backend subsystem. Provider-specific OCR, vision,
-or LLM responses must not leak into API, database, normalization, or validation
-contracts.
+Extraction and normalization are separate backend subsystems. Provider-specific
+OCR, vision, or LLM responses must not leak into API, database, normalization,
+or validation contracts.
 
 ## Directory structure
 
@@ -128,71 +112,70 @@ not reorganize the project without discussing it first.
 - Maximum file size: 20 MB; maximum page count: 10 pages
 - Structurally readable PDF content is required
 
-Stage 3 may determine that a readable PDF is not an invoice, is not in English,
-or cannot be extracted. Do not broaden input support to images or other file
-types during this stage.
+Do not broaden input support to images or other file types.
 
-## Stage 3 guardrails (summary — full spec in `docs/stage-3-extraction.md`)
+## Stage 3 invariants that must stay intact
 
-- Lifecycle: `UPLOADED -> PROCESSING -> COMPLETED | FAILED`, and
-  `FAILED -> PROCESSING -> COMPLETED | FAILED` on explicit retry. Do not set
-  `PROCESSING` until extraction actually begins. `COMPLETED` means extraction
-  finished only — not normalization or validation. `NEEDS_REVIEW` is not a
-  Stage 3 status and must not be assigned for low confidence.
-- One active extraction per document; reject duplicate or concurrent starts.
-  A failure must leave the document and original PDF intact.
-- Provider stays behind a small interface (input: provider-ready content;
-  output: the validated internal contract). No application code depends on a
-  provider SDK. Document the provider choice before building the real adapter.
-- Every provider response is parsed and validated against the invoice schema
-  before persistence; malformed output is never stored as a success. Raw
-  provider responses are internal audit data and are never returned by public
-  endpoints.
+- Lifecycle `UPLOADED -> PROCESSING -> COMPLETED | FAILED`, and
+  `FAILED -> PROCESSING -> COMPLETED | FAILED` on explicit retry. `PROCESSING`
+  is not set until extraction begins. `COMPLETED` means extraction finished
+  only. `NEEDS_REVIEW` is not used.
+- One active extraction per document; duplicate or concurrent starts are
+  rejected. A failure leaves the document and original PDF intact.
+- The provider stays behind `ExtractionProvider` (input: provider-ready
+  content; output: the validated internal contract). No application code
+  depends on a provider SDK.
+- Every provider response is schema-validated before persistence; malformed
+  output is never stored as a success. Raw provider responses are internal
+  audit data and are never returned by public endpoints.
 - Per-field confidence is a decimal in `[0, 1]` or `null`; there is no
   document-level confidence. Missing values are `null`, never invented.
-- Money and quantities are decimals and must serialize without floating-point
-  artifacts.
-- Date values stay raw strings during extraction — not interpreted, reformatted,
-  or rejected here. Currency is the conventional 3-letter alphabetic form,
-  upper-cased. Neither is converted, defaulted, or recognized until
-  normalization.
+- Money and quantities are decimals that serialize without floating-point
+  artifacts. Extracted dates stay raw strings; currency is upper-cased but not
+  recognized, converted, or defaulted (that is Stage 4).
 - Every scalar field, both keys of every `{value, confidence}` pair, and
-  `line_items` must be present in a payload. Values and confidences may be
-  `null`; later stages judge their meaning.
-- Schema changes go through Alembic migrations.
-- New API: start extraction, get latest result with per-field confidence, retry
-  a failed extraction, `404` for unknown IDs, a clear conflict response for
-  illegal status transitions. Stage 2 endpoints stay backward compatible.
-- Frontend: show real processing status and, at most, a read-only extraction
-  result. No editable human-review workflow.
-- Automated tests use a deterministic fake provider and never call an external
-  AI service.
+  `line_items` are present in a payload; values and confidences may be `null`.
+- Automated tests use the deterministic fake provider and never call an
+  external AI service.
 
-## Stage 3 implementation order
+## Stage 4 guardrails (summary — full spec in `docs/stage-4-normalization.md`)
 
-Build in this sequence. Introduce no external AI/LLM call before step 12. Each
-step is described in full in `docs/stage-3-extraction.md`.
-
-1. Define the extraction data contract (schema only, no AI).
-2. Design the extraction database models (`invoice_extractions`,
-   `invoice_line_items`; multiple attempts per document).
-3. Create the Alembic migration (verify upgrade + downgrade; Stage 2 data intact).
-4. Create the backend schemas (internal / persistence / request / public).
-5. Build the extraction repository/service foundation (transactional writes,
-   attempt history, no conflicting active attempts).
-6. Implement the processing lifecycle and explicit retry.
-7. Add the extraction API endpoints (`404` + conflict responses; Stage 2 API
-   unchanged).
-8. Build and test PDF preprocessing (provider-independent; original untouched).
-9. Create a deterministic fake extraction provider (no external calls).
-10. Build an evaluation dataset.
-11. Evaluate and select the real provider.
-12. Integrate the real provider last (replaceable adapter behind the interface;
-    schema-validate before persistence).
-13. Run the complete Stage 3 verification.
-
-Normalization follows Stage 3 and owns date interpretation, currency-code
-recognition, and handling of invalid extracted values. Do not pull that forward.
+- Stage 4 reads a completed Stage 3 extraction and produces a separate,
+  traceable normalized result. Raw extraction values and the original PDF stay
+  unchanged. Normalization is deterministic with no AI or external-network
+  call.
+- Valid dates become `YYYY-MM-DD`; impossible or ambiguous dates produce a
+  structured field error, not a guessed value.
+- Currency codes are trimmed, upper-cased, and checked against an approved ISO
+  4217 list. Symbols are interpreted only under explicit deterministic rules.
+  Missing currency is not defaulted; foreign currency is not converted.
+- Money and quantities use decimal arithmetic. Accepted grouping and decimal
+  separators are documented; malformed or ambiguous numbers produce an error.
+  Do not round unless an explicit precision rule requires it.
+- Text may be trimmed and have repeated whitespace collapsed. Empty or
+  whitespace-only values become `null`. Meaningful punctuation is preserved;
+  invoice numbers and tax identifiers stay strings.
+- A field-level normalization error is data, not a technical attempt failure.
+  Store a stable field path, raw value, safe error code, and safe message. Only
+  infrastructure failures make an attempt `FAILED`.
+- Lifecycle `COMPLETED extraction -> PROCESSING -> COMPLETED | FAILED`, and
+  `FAILED -> PROCESSING -> COMPLETED | FAILED` on explicit retry of a technical
+  failure. At most one active normalization attempt per source extraction;
+  attempt history is preserved; concurrent or illegal starts return `409`.
+- Normalized records reference their source extraction attempt and never
+  replace or mutate it. Schema changes go through Alembic migrations.
+- New API: start normalization, get the latest or a specific normalized result,
+  retry a failed attempt, `404` for unknown IDs, `409` for illegal transitions.
+  Stage 2 and Stage 3 endpoints stay backward compatible.
+- Public responses never expose internal exceptions, paths, secrets, or raw
+  diagnostics.
+- Exact date formats, numeric separator policies, currency-symbol rules,
+  text-length limits, and invalid-value representation are decided and written
+  into `docs/stage-4-normalization.md` before the step that needs them. Do not
+  invent policy in code.
+- Frontend: show normalization status and, at most, a read-only normalized
+  result. No editable review workflow.
+- Automated tests prove no AI or external-network call occurs.
 
 ## Stage 2 behavior that must stay intact
 
@@ -209,18 +192,19 @@ recognition, and handling of invalid extracted values. Do not pull that forward.
 ## Configuration
 
 Existing: `DATABASE_URL`, `UPLOAD_DIRECTORY`, `MAX_FILE_SIZE_MB=20`,
-`MAX_PDF_PAGES=10`. Add provider configuration only after selecting the provider.
-Keep safe placeholders in `.env.example`; never commit credentials or
-machine-specific values.
+`MAX_PDF_PAGES=10`, `EXTRACTION_PROVIDER=fake|openai` (plus the OpenAI API key
+when `openai` is selected). Add Stage 4 configuration only if a normalization
+policy genuinely requires it. Keep safe placeholders in `.env.example`; never
+commit credentials or machine-specific values.
 
-## Explicitly excluded from Stage 3
+## Explicitly excluded until later stages
 
-Do not implement these unless the user explicitly adds them to Stage 3 scope:
+Do not implement these unless the user explicitly adds them to the current
+stage's scope:
 
-- Normalization rules beyond safe parsing into the extraction contract
-- Defaulting missing currency to EUR or converting currencies
-- Deterministic invoice validation and total reconciliation
+- Deterministic invoice validation and total/line-item reconciliation
 - Confidence thresholds or discarding uncertain fields
+- Defaulting missing currency or converting currencies
 - Duplicate-invoice decisions
 - Escalation decisions and `NEEDS_REVIEW` transitions
 - High-value invoice rules
@@ -231,20 +215,19 @@ Do not implement these unless the user explicitly adds them to Stage 3 scope:
 - Images or non-PDF upload support
 - Autonomous or multi-agent processing
 
-Deferred normalization, validation, confidence, and escalation context lives in
-`docs/processing-spec.md`. Stage 3 may read it to keep contracts compatible but
-must not implement its deferred decisions.
+Deferred validation, confidence, and escalation context lives in
+`docs/processing-spec.md`. The current stage may read it to keep contracts
+compatible but must not implement its deferred decisions.
 
 ## Implementation conduct
 
 - Stay within the authorized stage; if a decision materially expands scope,
   record the question and ask before implementing.
-- Resolve the provider and API-contract decisions before coupling application
-  code to an external service; keep provider behavior replaceable and
-  deterministic in tests.
+- Keep provider behavior replaceable and deterministic in tests.
 - Prefer straightforward, maintainable modules over speculative abstractions.
 - Preserve clean boundaries between upload/storage, extraction, normalization,
   validation, and decisions.
 - Keep public errors client-safe; never expose internal paths, secrets, raw
   provider payloads, or stack traces. Retain useful internal diagnostics.
 - Update this document and the relevant READMEs when an agreed decision changes.
+- Keep this file lean; detailed stage specs live in `docs/`.

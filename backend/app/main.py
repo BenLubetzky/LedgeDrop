@@ -29,10 +29,8 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Define what happens when FastAPI server starts and when it shuts down"""
-    # Before the server startup make sure upload directory exists
     settings.upload_directory.mkdir(parents=True, exist_ok=True)
     yield
-    # After the server shutdown dispose engine
     await dispose_engine()
 
 
@@ -46,8 +44,6 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Adding CORS middleware to allow frontends from different origins to interact 
-    # with API
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allow_origins,
