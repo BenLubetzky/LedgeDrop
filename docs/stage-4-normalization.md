@@ -186,9 +186,24 @@ Do not build an editable review workflow.
 Build Stage 4 in this sequence. Introduce no AI or external-network call at any
 step. Detail for each step is filled in as the step is worked.
 
-1. **Define the normalization contract.** Normalized invoice fields and line
-   items, structured field errors, and the link to the source extraction
-   attempt. Schema definition only.
+1. **Define the normalization contract.** *(Done —
+   `backend/app/schemas/normalization.py`, test
+   `test_normalization_contract.py`.)* `NormalizedInvoice` holds the ten scalar
+   fields (each a single canonical value or `null`, no confidence),
+   `line_items` as `NormalizedLineItem` entries in source order, and `errors`
+   as a flat list of `NormalizationError`. `NormalizedInvoiceResult` binds the
+   contract to its `source_extraction_id`. Decision recorded: each error
+   records `field_path` (a stable path such as `total_amount` or
+   `line_items.0.unit_price`), `raw_value` (the offending source value,
+   stringified, or `null`), `code` (a member of the closed
+   `NormalizationErrorCode` set — starter set only; step 2 finalizes it), and a
+   client-safe `message`. An error path uses canonical zero-based indexes and
+   the normalized value at that path must be `null`. Canonical leaf types:
+   `NormalizedDate` (`YYYY-MM-DD`, real calendar date),
+   `NormalizedCurrencyCode` (3 letters,
+   upper-cased; ISO 4217 list check deferred to step 8), `NormalizedText`
+   (trimmed, non-empty — an empty result must be `null`). Schema definition
+   only; no AI, no database.
 2. **Document normalization policies.** Pin the dates, numbers, currencies,
    whitespace, empty-value, text-limit, and failure-representation policies in
    the "Policies to pin before implementation" section above.

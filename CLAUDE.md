@@ -56,6 +56,15 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
+Stage 4 progress: step 1 is complete. The internal normalized invoice data
+contract is `backend/app/schemas/normalization.py` (`NormalizedInvoice`,
+`NormalizedLineItem`, `NormalizationError` / `NormalizationErrorCode`,
+`NormalizedInvoiceResult`, plus the `NormalizedDate` / `NormalizedCurrencyCode`
+/ `NormalizedText` leaf types); test `test_normalization_contract.py`.
+Normalized fields hold a single canonical value or `null` and carry no
+confidence. A structured error records `field_path`, `raw_value`, `code`, and a
+client-safe `message`.
+
 ## Technology decisions
 
 - Frontend: Next.js with TypeScript
