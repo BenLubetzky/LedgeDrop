@@ -22,11 +22,12 @@ from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from app.api.deps import get_db, get_storage  # noqa: E402
+from app.api.deps import get_db, get_extractor, get_storage  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.database.base import Base  # noqa: E402
 import app.models  # noqa: E402,F401  (registers tables on Base.metadata)
 from app.main import create_app  # noqa: E402
+from app.services.processing.extraction.fake import FakeExtractionProvider  # noqa: E402
 from app.services.storage import LocalFileStorage  # noqa: E402
 
 
@@ -113,6 +114,7 @@ def app(session_factory, storage):
 
     application.dependency_overrides[get_db] = _override_get_db
     application.dependency_overrides[get_storage] = lambda: storage
+    application.dependency_overrides[get_extractor] = lambda: FakeExtractionProvider()
     return application
 
 

@@ -46,95 +46,67 @@ supplies it. Full spec in `docs/stage-3-extraction.md`; provider rationale in
 - Evaluation: `backend/evaluation/` (`expected.json`, `generate_invoices.py`,
   `dataset.py`, `scoring.py`)
 
-**Stage 4 (normalization): authorized, current stage.** Stage 4 converts the
-raw, immutable output of a completed Stage 3 extraction into separate canonical
-values where normalization is deterministic, and records structured field errors
-where a value is invalid or ambiguous. It makes no AI or external-network call.
-It does not implement business validation, confidence thresholds, totals
-reconciliation, duplicate decisions, acceptance/rejection, escalation, or human
-review. Full specification — contract, policies to pin, persistence layout, API
-scope, 14-step implementation order, verification list — is in
-`docs/stage-4-normalization.md`; read it before implementing.
+**Stage 4 (normalization): complete.** Converts the raw, immutable output of a
+completed Stage 3 extraction into a separate, traceable normalized result:
+deterministic canonical values, with a structured field error wherever a value
+is invalid or ambiguous. No AI or external-network call. It does not implement
+business validation, confidence thresholds, totals reconciliation, duplicate
+decisions, acceptance/rejection, escalation, or human review. Full spec —
+contract, pinned policies, persistence layout, API, verification map — in
+`docs/stage-4-normalization.md`. Key code:
 
-Stage 4 progress: steps 1–12 are complete. Step 12 — the normalization API in
-`backend/app/api/normalizations.py` (dependency `get_normalization_service`;
-registered in `app/api/router.py`; test `test_normalizations_api.py`; README
-"Normalization API (Stage 4)"). Paths hang off a Stage 3 extraction:
-`POST /documents/{id}/extractions/{eid}/normalizations` (start, `201`),
-`.../retry` (`201`), `GET .../normalizations` (history, newest first),
-`.../latest`, `.../{nid}`. Response is `InvoiceNormalizationResult` (canonical
-scalars + `line_items` + `errors`, no confidence, no `document_id`); empty
-request body, `422` on unknown keys. `404` is
-`DOCUMENT_NOT_FOUND`/`EXTRACTION_NOT_FOUND`/`NORMALIZATION_NOT_FOUND`; `409`
-surfaces the step 11 lifecycle codes. A technical failure is still `201` with
-`status = FAILED`; a field error rides inside `data.errors`. Stage 2/3
-endpoints unchanged. Step 11 — the normalization engine,
-repository, lifecycle, and service in
-`backend/app/services/processing/normalization/` (`engine.py`, `repository.py`,
-`lifecycle.py`, `service.py`; test `test_normalization_service.py`):
-`normalize_extraction` runs the step 6–10 normalizers over every scalar field
-and line item, attaching a stable `field_path` + stringified `raw_value` to
-each field error; `NormalizationService.start` / `retry` lock the source
-extraction row, commit a `PROCESSING` attempt before the engine runs, then
-persist normalized values, line items, and errors and mark `COMPLETED` in one
-transaction. A field-level error never fails the attempt; only an engine
-exception or a persistence failure does, rolling back to a `FAILED` attempt
-with a generic `NORMALIZATION_FAILED` reason and no partial result. Illegal or
-concurrent starts return `409` (`EXTRACTION_NOT_COMPLETED`,
-`NORMALIZATION_IN_PROGRESS`, `EXTRACTION_ALREADY_NORMALIZED`,
-`NORMALIZATION_FAILED`, `NORMALIZATION_NOT_FAILED`); an unknown extraction is
-`404`. The source extraction, document row, and PDF are never modified.
-Steps 6–10 — the deterministic field normalizers
-in `backend/app/services/processing/normalization/` are done and heavily
-regression-tested (`test_normalization_normalizers.py`). Each normalizer
-applies only the input cleanup its policy permits — currency and numbers do NOT
-use the broad `clean_text`, so hidden zero-width / control characters make a
-value a field error rather than being silently repaired; `clean_text` (for
-names / descriptions / identifiers) removes only the characters the text policy
-names. Contract-invalid non-`str` text raises instead of being silently
-stringified, allowing the lifecycle service to record a technical failure.
-Step 1 — the internal
-normalized
-invoice data contract in `backend/app/schemas/normalization.py`
-(`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
-`NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /
-`NormalizedCurrencyCode` / `NormalizedText` leaf types); test
-`test_normalization_contract.py`. Normalized fields hold a single canonical
-value or `null` and carry no confidence; a structured error records
-`field_path`, `raw_value`, `code`, and a client-safe `message`. Step 2 — the
-normalization policies (dates, numbers, currency, currency symbols, whitespace,
-empty values, text limits, failure behavior) are decided and written in
-`docs/stage-4-normalization.md`; `NormalizationErrorCode` is finalized at six
-members, and numeric dates with an undetermined day/month order are read
-day-first (`DD/MM/YYYY`) by default rather than erroring. Money and quantities
-arrive from Stage 3 already parsed to `Decimal`, so normalization preserves
-sign and scale without rounding rather than re-parsing number text. Step 3 —
-the persistence models in `backend/app/models/normalization.py`
-(`NormalizationAttempt`, `NormalizationLineItem`, `NormalizationFieldError`,
-plus the `NormalizationStatus` / `NormalizationErrorCode` enums): tables
-`invoice_normalizations`, `invoice_normalized_line_items`,
-`invoice_normalization_errors`, keyed `(extraction_id, attempt_number)` with a
-partial unique index for one active attempt; `ExtractionAttempt` gains a
-`normalizations` relationship; test `test_normalization_model.py`. Step 4 — the
-Alembic migration `0003_normalization_tables` (down_revision
-`0002_invoice_extraction_tables`) creates the two enum types and three tables
-with all constraints/indexes and drops them on downgrade; verified
-up/down/re-up on a throwaway database with seeded Stage 2/3 rows intact, and
-`alembic check` reports no model drift. Step 5 — the schema layer:
-`backend/app/schemas/normalization_persistence.py` (nested `NormalizedInvoice`
-<-> flat column bridge, no `_value`/`_confidence` split) and
-`normalization_api.py` (`NormalizationStartRequest`;
-`InvoiceNormalizationResult.from_attempt`, exposing status, timestamps,
-`extraction_id`, failure info and `data: NormalizedInvoice` — no confidence,
-no diagnostics); test `test_normalization_schemas.py`. Step 6 — the reusable
-deterministic field normalizers in
-`backend/app/services/processing/normalization/` (`normalizers.py`,
-`iso4217.py`): `normalize_date` / `_currency` / `_money` / `_quantity` /
-`_text` / `_invoice_number` / `_tax_id`, each returning a `NormResult` (value,
-clean absence, or a `FieldError` with a closed code + safe message); no AI, no
-I/O. Money/quantity `Decimal`s pass through with sign and scale intact.
-Currency checks the vendored `APPROVED_CURRENCY_CODES` allow-list. Test
-`test_normalization_normalizers.py`.
+- Contract: `backend/app/schemas/normalization.py` (`NormalizedInvoice` etc.;
+  single canonical value or `null` per field, no confidence; a structured error
+  records `field_path`, stringified `raw_value`, closed `code`, safe `message`).
+- Policies (dates, numbers, currency, symbols, whitespace, empty, text limits,
+  failure behaviour): fixed in `docs/stage-4-normalization.md`.
+  `NormalizationErrorCode` is six members; numeric dates of undetermined
+  day/month order read day-first (`DD/MM/YYYY`); money/quantity arrive as
+  `Decimal` and pass through with sign and scale intact, never rounded.
+- Persistence: `backend/app/models/normalization.py` (`invoice_normalizations`
+  / `invoice_normalized_line_items` / `invoice_normalization_errors`, keyed
+  `(extraction_id, attempt_number)` + partial unique index for one active
+  attempt); migration `0003_normalization_tables`.
+- Schemas: `normalization_persistence.py` (nested↔flat bridge, no
+  `_value`/`_confidence` split), `normalization_api.py`, `pipeline_api.py`.
+- Normalizers: `backend/app/services/processing/normalization/normalizers.py` +
+  `iso4217.py` — `normalize_date` / `_currency` / `_money` / `_quantity` /
+  `_text` / `_invoice_number` / `_tax_id`, each returning a `NormResult`. Each
+  applies only the cleanup its field policy permits: currency and numbers do
+  NOT use the broad `clean_text`, so a hidden zero-width / control character
+  makes a value a field error, not a silently repaired value. Contract-invalid
+  non-`str` text raises, becoming a technical failure.
+- Engine / service / lifecycle:
+  `backend/app/services/processing/normalization/` (`engine.py`,
+  `repository.py`, `lifecycle.py`, `service.py`). `normalize_extraction` runs
+  the normalizers over every scalar and line item, attaching `field_path` +
+  `raw_value` to each field error. `NormalizationService.start` / `retry` lock
+  the source extraction row, commit a `PROCESSING` attempt before the engine
+  runs, then persist values + line items + errors and mark `COMPLETED` in one
+  transaction. A field-level error never fails the attempt; only an engine
+  exception or a persistence failure does — rolled back to a `FAILED` attempt
+  with a generic `NORMALIZATION_FAILED` reason and no partial result. The
+  source extraction, document row, and PDF are never modified.
+- API: `backend/app/api/normalizations.py` under
+  `/documents/{id}/extractions/{eid}/normalizations[...]` (start / retry / list
+  / latest / `{nid}`); response `InvoiceNormalizationResult` (canonical scalars
+  + `line_items` + `errors`, no confidence, no `document_id`, no diagnostics);
+  `404` `DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND`;
+  `409` `EXTRACTION_NOT_COMPLETED` / `NORMALIZATION_IN_PROGRESS` /
+  `EXTRACTION_ALREADY_NORMALIZED` / `NORMALIZATION_FAILED` /
+  `NORMALIZATION_NOT_FAILED`. A technical failure is still `201` with
+  `status = FAILED`.
+- Pipeline: `backend/app/services/processing/pipeline.py` (`ProcessingPipeline`)
+  + `backend/app/api/pipeline.py` — `POST /documents/{id}/pipeline[/retry]` runs
+  the extraction stage and then, only when it ended `COMPLETED`, the
+  normalization stage; response `PipelineRunResult`
+  (`{ extraction, normalization|null }`). It adds no processing rules; each
+  stage stays independently callable. No Stage 5 validation.
+- Tests: `backend/tests/test_normalization_{contract,model,normalizers,schemas,
+  service}.py`, `test_normalizations_api.py`, `test_pipeline{,_api}.py`, and
+  `test_stage4_verification.py` (the checklist, mostly end to end). "No
+  network" is proven by a `socket`-blocked engine run and a source scan of the
+  normalization package.
 
 ## Technology decisions
 
@@ -160,7 +132,7 @@ Browser -> Next.js frontend -> FastAPI document API
    |-- Local original-PDF storage
    `-- Processing pipeline
        |-- Extraction             <- Stage 3 (done)
-       |-- Normalization          <- Stage 4 (current)
+       |-- Normalization          <- Stage 4 (done)
        |-- Validation             <- later
        `-- Decision / escalation  <- later
 ```

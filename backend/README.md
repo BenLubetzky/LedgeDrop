@@ -1,9 +1,11 @@
 # LedgerDrop backend
 
-FastAPI + async SQLAlchemy service. Stage 2 scope is the **upload foundation**:
-the application skeleton, configuration, database layer, migrations, consistent
-API errors, and a local file-storage service. Invoice extraction and later
-processing stages are intentionally not implemented.
+FastAPI + async SQLAlchemy service. Stage 2 built the **upload foundation** (app
+skeleton, configuration, database layer, migrations, consistent API errors,
+local file storage); Stage 3 added **structured invoice extraction** and Stage 4
+added deterministic **normalization** of a completed extraction, wired together
+as `upload → extraction → normalization`. Validation and decision/escalation are
+not implemented yet.
 
 ## Requirements
 
@@ -331,6 +333,41 @@ FAILED normalization ─(retry)─> PROCESSING ─> COMPLETED | FAILED
 - Extraction and normalization stay independently callable; normalization never
   changes the document or extraction rows.
 
+### Processing pipeline
+
+`ProcessingPipeline` (`app/services/processing/pipeline.py`) composes the stages
+into `upload → extraction → normalization → (later) validation`. It adds no
+processing rules — it runs the extraction stage and then, only when it ended
+`COMPLETED`, the normalization stage, against one session.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/documents/{document_id}/pipeline` | run extraction, then normalization (`201`) |
+| `POST` | `/documents/{document_id}/pipeline/retry` | retry a failed extraction, then normalize the new attempt (`201`) |
+
+**Response** (`PipelineRunResult`) — the two per-stage public results side by
+side, no fields of its own:
+
+```jsonc
+{
+  "extraction":    { /* InvoiceExtractionResult */ },
+  "normalization": { /* InvoiceNormalizationResult */ } | null
+}
+```
+
+- `normalization` is `null` when the extraction did not complete (nothing to
+  normalize) — retry the pipeline. When present it may itself be `FAILED` (a
+  normalization technical failure that left the completed extraction intact) or
+  `COMPLETED` with field-level errors in `normalization.data.errors`.
+- A run that *starts* is `201` even if a stage then fails; the stage's `status`
+  and `failure_code` say what happened. The extraction stage's own `404`
+  (`DOCUMENT_NOT_FOUND`) and `409` (`DOCUMENT_ALREADY_EXTRACTED`,
+  `EXTRACTION_NOT_FAILED`, …) propagate unchanged. Unknown body keys →
+  `422 VALIDATION_ERROR`.
+- The per-stage endpoints (`/extractions[...]`,
+  `/extractions/{eid}/normalizations[...]`) are unchanged and remain the way to
+  drive or inspect one stage in isolation.
+
 ## Tests
 
 ```bash
@@ -344,7 +381,17 @@ uv run pytest
 The suite runs against PostgreSQL (the project uses PostgreSQL only). It connects
 with `DATABASE_URL` but swaps in a dedicated `ledgerdrop_test` database, which it
 creates automatically and rebuilds for every test. Set `TEST_DATABASE_URL` to
-point at a different server. No services beyond PostgreSQL are required.
+point at a different server. No services beyond PostgreSQL are required, and no
+test calls an external AI service — extraction runs on the deterministic fake
+provider and normalization makes no network call at all.
+
+`tests/test_stage4_verification.py` is the Stage 4 acceptance checklist: every
+bullet (date formats, ambiguous/impossible dates, currency validity, separator
+rules, negative/malformed amounts, quantity parsing, text/identifier
+preservation, null/empty values, line items, structured errors, DB constraints,
+lifecycle/retry, concurrency, transaction rollback, retrieval + `404`/`409`,
+Stage 3 preservation, no-AI/no-network) maps to an assertion there, mostly
+exercised end to end through the engine + service + API + pipeline.
 
 ## Layout
 
@@ -369,6 +416,7 @@ app/
     normalization.py             internal normalized invoice contract (single value | null, no confidence)
     normalization_persistence.py nested <-> flat mapping for the normalization tables
     normalization_api.py         normalization request + public response models
+    pipeline_api.py              PipelineRunRequest + PipelineRunResult (both stage results)
   services/
     pdf.py           inspect_pdf: signature + readability + page-count check
     storage/
@@ -389,11 +437,13 @@ app/
         lifecycle.py      valid extraction / normalization-attempt transitions
         repository.py      NormalizationRepository - reads/writes the normalization tables
         service.py         NormalizationService - start / retry, PROCESSING -> COMPLETED|FAILED
+      pipeline.py       ProcessingPipeline - composes extraction -> normalization (no rules of its own)
   api/
-    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service)
+    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_pipeline)
     documents.py     POST /documents, GET /documents[/{id}[/file]]
     extractions.py   POST/GET /documents/{id}/extractions[...]
     normalizations.py POST/GET /documents/{id}/extractions/{eid}/normalizations[...]
+    pipeline.py      POST /documents/{id}/pipeline[/retry]
     health.py        health endpoints
     router.py        aggregate router
 evaluation/          synthetic invoice set + ground truth (extraction accuracy)

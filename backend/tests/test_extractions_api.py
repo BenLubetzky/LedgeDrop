@@ -177,7 +177,7 @@ async def test_retry_after_a_failed_extraction_completes_as_attempt_two(
     failed = (await client.post(f"/documents/{document_id}/extractions")).json()
     assert failed["status"] == "FAILED"
 
-    app.dependency_overrides.pop(get_extractor)  # back to the deterministic fake
+    app.dependency_overrides[get_extractor] = lambda: FakeExtractionProvider()
 
     resp = await client.post(f"/documents/{document_id}/extractions/retry")
     assert resp.status_code == 201, resp.text
@@ -212,7 +212,7 @@ async def test_latest_extraction_returns_the_newest_attempt(
     _install_failing_extractor(app)
     document_id = await _upload(client)
     await client.post(f"/documents/{document_id}/extractions")
-    app.dependency_overrides.pop(get_extractor)
+    app.dependency_overrides[get_extractor] = lambda: FakeExtractionProvider()
     await client.post(f"/documents/{document_id}/extractions/retry")
 
     resp = await client.get(f"/documents/{document_id}/extractions/latest")
@@ -233,7 +233,7 @@ async def test_list_extractions_is_newest_first(client: AsyncClient, app) -> Non
     _install_failing_extractor(app)
     document_id = await _upload(client)
     await client.post(f"/documents/{document_id}/extractions")
-    app.dependency_overrides.pop(get_extractor)
+    app.dependency_overrides[get_extractor] = lambda: FakeExtractionProvider()
     await client.post(f"/documents/{document_id}/extractions/retry")
 
     resp = await client.get(f"/documents/{document_id}/extractions")

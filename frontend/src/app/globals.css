@@ -267,17 +267,18 @@ svg {
 .status-needs_review, .status-failed { background: var(--danger-soft); color: var(--danger); }
 .document-state-actions { display: inline-flex; align-items: center; gap: 7px; }
 .extraction-button {
-  min-height: 28px;
-  border: 1px solid var(--blue);
+  border: 0;
   background: transparent;
   color: var(--blue);
   cursor: pointer;
-  padding: 0 9px;
-  font-size: 10px;
-  font-weight: 600;
+  padding: 5px 2px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
-.extraction-button:hover:not(:disabled) { background: var(--blue); color: white; }
+.extraction-button:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 3px; }
 .extraction-button:disabled { cursor: wait; opacity: 0.55; }
 .remove-button, .remove-confirm-button, .remove-cancel-button {
   border: 0;
@@ -289,11 +290,10 @@ svg {
   text-transform: uppercase;
 }
 .remove-button {
-  padding: 5px 8px;
-  background: var(--danger-soft);
+  padding: 5px 2px;
   color: var(--danger);
 }
-.remove-button:hover { background: var(--danger); color: white; }
+.remove-button:hover { text-decoration: underline; text-underline-offset: 3px; }
 .remove-confirmation {
   display: inline-flex;
   align-items: center;

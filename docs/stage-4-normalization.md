@@ -605,14 +605,47 @@ step. Detail for each step is filled in as the step is worked.
     `data.errors`. Raw exceptions, paths, and secrets never reach a response
     (the shared error envelope collapses anything unexpected to a generic
     `500`). Stage 2 and Stage 3 endpoints are unchanged.
-13. **Connect the pipeline** as `upload -> extraction -> normalization`, keeping
-    extraction and normalization independently callable during development. Do
-    not pull Stage 5 validation into Stage 4.
-14. **Run the complete Stage 4 verification.**
+13. **Connect the pipeline** as `upload -> extraction -> normalization`.
+    *(Done — `backend/app/services/processing/pipeline.py`
+    (`ProcessingPipeline`, `PipelineResult`), schema
+    `app/schemas/pipeline_api.py` (`PipelineRunRequest`, `PipelineRunResult`),
+    routes `app/api/pipeline.py` + dependency `get_pipeline`, registered in
+    `app/api/router.py`; tests `test_pipeline.py`, `test_pipeline_api.py`;
+    README "Processing pipeline" section.)* `ProcessingPipeline.run` runs the
+    extraction stage (`start` or `retry`) and then, only when it ended
+    `COMPLETED`, the normalization stage, against one session — it adds **no**
+    processing rules of its own. `POST /documents/{id}/pipeline` and
+    `.../pipeline/retry` return `PipelineRunResult` = `{ extraction:
+    InvoiceExtractionResult, normalization: InvoiceNormalizationResult | null }`
+    (`normalization` is `null` when the extraction did not complete). A run that
+    *starts* is `201` even if a stage then fails; the stage's own `status` /
+    `failure_code` say what happened, and the extraction stage's own `404` /
+    `409` codes propagate unchanged. A normalization technical failure does not
+    undo the completed extraction (the pipeline re-loads both attempts after the
+    normalization stage's rollback so the caller always gets live rows). Each
+    stage keeps its own service, lifecycle, repository, and endpoints and stays
+    independently callable; the pipeline just composes them. No Stage 5
+    validation is implemented — it will be appended to `run` later, gated on a
+    `COMPLETED` normalization.
+14. **Run the complete Stage 4 verification.** *(Done — the Stage 4 suite is
+    `backend/tests/test_normalization_contract.py`, `_model.py`,
+    `_normalizers.py`, `_schemas.py`, `_service.py`,
+    `test_normalizations_api.py`, `test_pipeline.py`, `test_pipeline_api.py`,
+    and the consolidated `test_stage4_verification.py`, which maps every
+    checklist bullet below to an assertion and runs most of them end to end
+    through the composed engine + service + API + pipeline stack.)* All Stage 4
+    tests pass and the full backend suite passes with no regression to
+    Stage 2 / 3. The two "no AI / no network" guards: `normalize_extraction`
+    completes a rich, error-laden contract with every `socket` connection
+    primitive patched to raise, and no file under
+    `app/services/processing/normalization/` imports an AI or network client
+    (the lifecycle service reuses `ExtractionRepository` for DB reads only).
 
 ## Verification
 
-Stage 4 verification must cover:
+Stage 4 verification covers (see `backend/tests/test_stage4_verification.py`
+for the bullet-to-test map, plus the per-layer `test_normalization_*.py` /
+`test_pipeline*.py` files):
 
 - supported, ambiguous, and impossible dates;
 - valid, invalid, missing, and lower-case currencies;
@@ -628,5 +661,7 @@ Stage 4 verification must cover:
 - concurrency protection;
 - transaction rollback;
 - retrieval and `404`/`409` behavior;
-- preservation of every Stage 3 raw value and the original PDF;
+- preservation of every Stage 3 raw value and the original PDF
+  (normalization never writes an `invoice_extractions` / `documents` row and
+  has no storage dependency);
 - proof that no AI or external-network call occurs.
