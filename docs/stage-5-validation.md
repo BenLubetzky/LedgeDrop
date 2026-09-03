@@ -11,9 +11,10 @@ API code, until the user explicitly authorizes that step. Nothing in the
 codebase depends on the policies below yet; they live only here until step 8.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
-They are deliberately conservative and self-documenting (every finding records
-the threshold it used). Expect the reviewer to confirm or retune them against
-real invoice data; changing a ⚠ value is a doc edit until step 8.
+They are deliberately conservative and self-documenting (every
+threshold-based finding records the threshold it used). Expect the reviewer to
+confirm or retune them against real invoice data; changing a ⚠ value is a doc
+edit until step 8.
 
 Stage 5 converts a completed Stage 4 normalization into a separate, traceable
 set of **structured findings**. It makes no AI call and no external-network
@@ -99,10 +100,11 @@ FAILED validation ──(explicit retry)──> PROCESSING ──> COMPLETED | F
   `PROCESSING` or `FAILED` normalization → `409`.
 - At most one active (`PROCESSING`) validation attempt per normalization
   attempt; concurrent or illegal starts → `409`.
-- A `COMPLETED` validation attempt is terminal and is not re-run. Producing a
-  fresh validation requires a fresh normalization attempt (a Stage 4 retry).
-  A future explicit "re-validate" capability is deferred; note that duplicate
-  and date-plausibility findings are as-of the run (see §2.8).
+- A `COMPLETED` validation attempt is terminal and is not re-run. Stage 4 only
+  permits retry after a technical normalization failure, so the current MVP has
+  no route to re-validate completed normalized data. A future explicit
+  "re-validate" capability is deferred; note that duplicate and
+  date-plausibility findings are as-of the run (see §2.8).
 - Attempt history is preserved: `attempt_number` 1, 2, 3, … per normalization
   attempt; a retry never mutates an earlier attempt.
 - A rule violation is **not** a `FAILED` attempt. `FAILED` means only: the
@@ -199,8 +201,9 @@ reconciles  ⇔  abs((subtotal + tax_amount) − total_amount) ≤ 0.01      ⚠
   absorb one minor-unit rounding in the source document, tight enough that a
   real discrepancy is caught. (Stage 4 does not quantise to minor units, so a
   per-currency minor unit is not available; a flat 0.01 is the pragmatic
-  choice. JPY and other zero-decimal currencies will effectively require exact
-  equality, which is correct for them.)
+  choice. This also permits a difference up to `0.01` for JPY and other
+  zero-decimal currencies; exact per-currency minor-unit handling is deferred
+  unless the reviewer chooses it in the open questions.)
 - Sign is not special-cased: the equation holds for negative totals
   (credit notes) unchanged.
 - Severity `warning`, not `error`: a mismatch can mean an uncaptured discount
@@ -234,8 +237,9 @@ target  = subtotal                       if subtotal is non-null
 sums  ⇔  abs(Σ line_total − target) ≤ max(0.01, 0.01 × line_count)        ⚠
 ```
 
-Severity `warning`, `field_path = null` (invoice-level), `context.target_field`
-records which of the three targets was used, `context.line_count`,
+Severity `warning`, `field_path = null` (invoice-level), `context.target_basis`
+records `subtotal`, `total_less_tax`, or `total` to identify the selected
+target, together with `context.line_count`,
 `context.sum`, `context.delta`. The tolerance grows by one minor unit per line
 to absorb accumulated per-line rounding.
 
@@ -248,13 +252,16 @@ total), so the decision stage knows the check was skipped rather than passed.
 Rule `probable_duplicate_invoice`. Deterministic, **exact-match only** — no
 fuzzy / edit-distance matching in the MVP (noted as a future extension).
 
-**Candidate set.** The latest `COMPLETED` normalization attempt of every
-document *other than* the one under validation (join
-`invoice_normalizations → invoice_extractions → documents`, exclude the current
-`document_id`, take the highest `attempt_number` per `extraction`, and the
-newest extraction per document). Only documents already normalized at the
-moment validation runs are considered (see §2.8 on as-of semantics and A/B
-asymmetry).
+**Candidate set.** The latest `COMPLETED` normalization belonging to the latest
+`COMPLETED` extraction of every document *other than* the one under validation
+(join `invoice_normalizations → invoice_extractions → documents`, exclude the
+current `document_id`; first choose the highest completed extraction
+`attempt_number` per document, then its highest completed normalization
+`attempt_number`, if one exists). Do not fall back to an older extraction when
+the latest one has no completed normalization. A candidate must have
+`normalization.completed_at <= validation.started_at`, so a normalization that
+finishes concurrently after validation started cannot leak into the run's
+as-of snapshot. See §2.8 on A/B asymmetry.
 
 **Match key** — a candidate is a probable duplicate of the invoice under
 validation when **all** of these hold (both sides non-null and equal):
@@ -273,7 +280,8 @@ If `invoice_number`, `vendor_name`/`vendor_tax_id`, `currency`, or
 
 **Output.** One finding regardless of how many candidates match, severity
 `warning`, `field_path = null`, `context.matches` = a list of
-`{ document_id, normalization_id }` for the matched candidates. Exposing a
+`{ document_id, normalization_id }` for the matched candidates, sorted by
+`document_id` and then `normalization_id` for reproducible output. Exposing a
 sibling `document_id` is a business fact, not an internal diagnostic; ⚠ the
 reviewer should confirm this is acceptable before there is multi-tenancy.
 
@@ -345,9 +353,9 @@ Duplicate detection additionally depends on which other documents are already
 normalized when the attempt runs. Consequences, all acceptable and to be
 documented in the API:
 
-- re-running validation is only possible via retry after a technical `FAILED`,
-  or via a fresh Stage 4 normalization; a `COMPLETED` validation is frozen with
-  its findings and its run date;
+- retry creates a new attempt only after a technical `FAILED`; a `COMPLETED`
+  validation is frozen with its findings and run date, and cannot currently be
+  re-run because Stage 4 does not re-normalize a completed result;
 - if document A is validated before document B exists, A carries no duplicate
   finding and B (validated later) flags A — B is the later, probable-duplicate
   copy, which is the desired direction.
@@ -492,7 +500,8 @@ Stage 5 verification must cover:
   above, nothing for an absent field — on both the fake provider (real
   confidences) and an all-`null` confidence row (OpenAI-like);
 - duplicate detection: exact match, each key field differing in turn, the
-  candidate-set scoping (other documents only, latest attempt only), the
+  candidate-set scoping (other documents only, latest completed extraction and
+  normalization, `completed_at` cutoff), deterministic match ordering, the
   multi-match single-finding shape, and A/B asymmetry;
 - high-value at and around the per-currency threshold and the default, with
   `abs()` applied to a negative total;
@@ -523,8 +532,8 @@ The ⚠ items, collected:
    currency, total_amount}` the right required set, or should `subtotal` /
    `tax_amount` / at least one line item be required too?
 2. **Monetary tolerance** — flat `0.01` absolute, or add a relative component
-   for large invoices? Confirm exact equality is acceptable for JPY-class
-   currencies.
+   for large invoices? Should JPY-class currencies use exact equality (or a
+   vendored per-currency minor-unit tolerance) instead of the flat `0.01`?
 3. **Line-sum tolerance** — `max(0.01, 0.01 × line_count)`, or a flat value?
 4. **Line-sum target precedence** — `subtotal` → `total_amount − tax_amount` →
    `total_amount`; confirm the fallbacks are wanted rather than "skip".
@@ -541,5 +550,5 @@ The ⚠ items, collected:
    `invoice_number` + `currency` + `total_amount` within tolerance; exact
    match only. Add fuzzy vendor-name matching now or defer? Is exposing a
    matched `document_id` in a finding acceptable pre-multi-tenancy?
-9. **Re-validation** — a `COMPLETED` validation is frozen (no re-validate
-   without a new normalization). Acceptable for the MVP?
+9. **Re-validation** — a `COMPLETED` validation is frozen and the current MVP
+   exposes no re-validation route. Acceptable for the MVP?
