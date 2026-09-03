@@ -108,8 +108,8 @@ contract, pinned policies, persistence layout, API, verification map — in
   network" is proven by a `socket`-blocked engine run and a source scan of the
   normalization package.
 
-**Stage 5 (deterministic invoice validation): spec written (steps 1–2), build
-NOT authorized.** Stage 5 will consume the exact completed Stage 4 normalization
+**Stage 5 (deterministic invoice validation): steps 1–3 done, steps 4–14 NOT
+authorized.** Stage 5 will consume the exact completed Stage 4 normalization
 attempt, evaluate a closed catalogue of deterministic rules, and record
 structured findings. It reports **facts only** — a rule violation completes
 validation with findings, not a technical failure — and never decides
@@ -118,13 +118,18 @@ is the later decision stage). No AI or external-network call. The boundary, the
 pinned policies, the rule catalogue, the 14-step order, and the verification
 list are in `docs/stage-5-validation.md`.
 
-Steps 1 (boundary) and 2 (policies) are done — the spec is the deliverable.
-Policy values in it marked ⚠ (required-field set, reconciliation tolerances,
-date windows, confidence threshold `0.70`, high-value thresholds, duplicate
-key) are provisional defaults for review, live only in that doc, and are not
-referenced by any code. Steps 3–14 (contract, persistence, migration, engine,
-service, API, pipeline, tests) are **not authorized** — do not start any of
-them until the user explicitly says so.
+Step 1 (boundary) and step 2 (policies) are the spec itself; step 3 (the
+internal contract) is `backend/app/schemas/validation.py` +
+`backend/tests/test_validation_contract.py` — `ValidationStatus` /
+`FindingSeverity` / `ValidationRule` (closed, 15 codes) / `ValidationFinding` /
+`ValidationSummary` / `InvoiceValidation` / `ValidatedInvoiceResult`, no
+decision vocabulary, `Decimal` serialised as strings, no `float` anywhere.
+Policy values marked ⚠ in the spec (required-field set, reconciliation
+tolerances, date windows, confidence threshold `0.70`, high-value thresholds,
+duplicate key) are provisional defaults for review, live only in that doc, and
+are not referenced by any code. Steps 4–14 (rule catalogue, persistence,
+migration, engine, service, API, pipeline, tests) are **not authorized** — do
+not start any of them until the user explicitly says so.
 
 ## Technology decisions
 

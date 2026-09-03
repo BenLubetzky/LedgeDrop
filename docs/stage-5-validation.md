@@ -5,10 +5,13 @@ high-level summary and the guardrails; this file holds the boundary (step 1),
 the pinned validation policies (step 2), the validation contract and rule
 catalogue these imply, the implementation order, and the verification list.
 
-**Status.** Steps 1 and 2 (this document) are done. Steps 3–14 are **not
-authorized** — do not start any of them, or write engine / schema / migration /
-API code, until the user explicitly authorizes that step. Nothing in the
-codebase depends on the policies below yet; they live only here until step 8.
+**Status.** Steps 1–3 are done: Parts 1–2 of this document, plus the internal
+validation contract in `backend/app/schemas/validation.py` (with
+`backend/tests/test_validation_contract.py`, which carries the §1.7 boundary
+tests). Steps 4–14 are **not authorized** — do not start any of them, or write
+rule / engine / persistence / migration / API code, until the user explicitly
+authorizes that step. No ⚠ policy value below is referenced by any code yet;
+they live only here until step 8.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
 They are deliberately conservative and self-documenting (every
@@ -421,13 +424,20 @@ Introduce no AI or external-network call at any step.
 2. **Set validation policies.** *(Done — Part 2 above. ⚠ values are provisional
    defaults pending review against real invoices; they are documented here and
    in no code.)*
-3. **Design the validation contract.** `app/schemas/validation.py`:
+3. **Design the validation contract.** *(Done — `app/schemas/validation.py`.)*
    `ValidationStatus` (`PROCESSING|COMPLETED|FAILED`), `FindingSeverity`
-   (`error|warning|info`), `ValidationRule` (closed enum, §3), `ValidationFinding`
-   (`rule`, `severity`, `field_path`, `expected`, `actual`, `message`,
-   `context`), `InvoiceValidation` (`findings`, `summary`), and a result type
-   binding it to its source `normalization_id`. Decimals serialise as strings;
-   unknown keys rejected; the boundary tests from §1.7.
+   (`error|warning|info`), `ValidationRule` (closed enum over the fifteen §3
+   codes), `ValidationFinding` (`rule`, `severity`, `field_path`, `expected`,
+   `actual`, `message`, `context`), `ValidationSummary` (`total` + per-severity
+   counts, re-derived and cross-checked against the finding list),
+   `InvoiceValidation` (`findings`, `summary`), and `ValidatedInvoiceResult`
+   binding it to its source `normalization_id`. `field_path` is `null` or a
+   Stage 4 path (scalar name or `line_items.<i>.<field>`), reusing the
+   normalization contract's name tuples so the two cannot drift.
+   `expected` / `actual` are a string, a `Decimal` (serialised as a JSON
+   string), or `null` — no bare `int`, no binary `float`; `context` rejects a
+   `float` anywhere in its structure. Unknown keys rejected on every model.
+   The §1.7 boundary tests live in `tests/test_validation_contract.py`.
 4. **Define the rule catalogue.** Formalise §3 as `ValidationRule` members and,
    for each, a spec of inputs, skip conditions, severity, and message text.
 5. **Resolve confidence limitations.** *(Decided — §2.6: `null` confidence →
