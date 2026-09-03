@@ -56,7 +56,7 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–3 are complete. Step 1 — the internal normalized
+Stage 4 progress: steps 1–4 are complete. Step 1 — the internal normalized
 invoice data contract in `backend/app/schemas/normalization.py`
 (`NormalizedInvoice`, `NormalizedLineItem`, `NormalizationError` /
 `NormalizationErrorCode`, `NormalizedInvoiceResult`, plus the `NormalizedDate` /
@@ -77,8 +77,12 @@ plus the `NormalizationStatus` / `NormalizationErrorCode` enums): tables
 `invoice_normalizations`, `invoice_normalized_line_items`,
 `invoice_normalization_errors`, keyed `(extraction_id, attempt_number)` with a
 partial unique index for one active attempt; `ExtractionAttempt` gains a
-`normalizations` relationship; test `test_normalization_model.py`. No Alembic
-migration yet (step 4).
+`normalizations` relationship; test `test_normalization_model.py`. Step 4 — the
+Alembic migration `0003_normalization_tables` (down_revision
+`0002_invoice_extraction_tables`) creates the two enum types and three tables
+with all constraints/indexes and drops them on downgrade; verified
+up/down/re-up on a throwaway database with seeded Stage 2/3 rows intact, and
+`alembic check` reports no model drift.
 
 ## Technology decisions
 

@@ -324,10 +324,20 @@ into different closed sets. `ExtractionAttempt` gains a
 `normalizations` relationship (cascade delete, oldest attempt first); nothing
 in Stage 3 behaviour changes.
 
-Requirements still in force:
+Migration: `alembic/versions/0003_normalization_tables.py` (down_revision
+`0002_invoice_extraction_tables`) creates the two enum types and three tables
+with every constraint and the partial unique index, and drops them (enum types
+included) on downgrade. Verified end to end on a throwaway database: seed a
+Stage 2 document + Stage 3 extraction at `0002`, upgrade to `head`, confirm the
+Stage 2/3 rows are untouched, the one-active-attempt index, the
+`status_fields_consistent` / `currency` / `field_path` CHECKs, and the
+document-delete cascade all work; downgrade to `0002` and confirm the three
+tables and both enum types are gone while `documents` / `invoice_extractions`
+and their enums remain; re-upgrade to `head`; `alembic check` reports no drift
+from the models.
 
-- Schema changes go through Alembic migrations (step 4); verify upgrade and
-  downgrade with existing Stage 2/Stage 3 data intact.
+Other requirements still in force:
+
 - Stage 3 rows stay immutable — normalization code only reads them.
 - Public responses never expose internal exceptions, paths, secrets, or raw
   internal diagnostics.
@@ -414,9 +424,12 @@ step. Detail for each step is filled in as the step is worked.
    `invoice_normalized_line_items`, `invoice_normalization_errors`. Attempt
    history via `(extraction_id, attempt_number)`; one active attempt via a
    partial unique index; Stage 3 rows untouched.
-4. **Create and verify the Alembic migration.** Foreign keys, constraints,
-   indexes, upgrade/downgrade, attempt history, and one-active-run protection,
-   without damaging existing data.
+4. **Create and verify the Alembic migration.** *(Done — see "Normalization
+   persistence" above.)* `0003_normalization_tables` creates the two enum types
+   and three tables with all foreign keys, constraints and the partial unique
+   index; downgrade drops them cleanly. Verified up / down / re-up on a
+   throwaway database with seeded Stage 2/3 rows; `alembic check` reports no
+   drift.
 5. **Create the schemas.** Separate internal, persistence, request, and public
    response models. Reject unknown keys; serialize decimals cleanly.
 6. **Implement the deterministic normalizers.** Small units for dates,
