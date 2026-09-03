@@ -56,7 +56,19 @@ review. Full specification — contract, policies to pin, persistence layout, AP
 scope, 14-step implementation order, verification list — is in
 `docs/stage-4-normalization.md`; read it before implementing.
 
-Stage 4 progress: steps 1–11 are complete. Step 11 — the normalization engine,
+Stage 4 progress: steps 1–12 are complete. Step 12 — the normalization API in
+`backend/app/api/normalizations.py` (dependency `get_normalization_service`;
+registered in `app/api/router.py`; test `test_normalizations_api.py`; README
+"Normalization API (Stage 4)"). Paths hang off a Stage 3 extraction:
+`POST /documents/{id}/extractions/{eid}/normalizations` (start, `201`),
+`.../retry` (`201`), `GET .../normalizations` (history, newest first),
+`.../latest`, `.../{nid}`. Response is `InvoiceNormalizationResult` (canonical
+scalars + `line_items` + `errors`, no confidence, no `document_id`); empty
+request body, `422` on unknown keys. `404` is
+`DOCUMENT_NOT_FOUND`/`EXTRACTION_NOT_FOUND`/`NORMALIZATION_NOT_FOUND`; `409`
+surfaces the step 11 lifecycle codes. A technical failure is still `201` with
+`status = FAILED`; a field error rides inside `data.errors`. Stage 2/3
+endpoints unchanged. Step 11 — the normalization engine,
 repository, lifecycle, and service in
 `backend/app/services/processing/normalization/` (`engine.py`, `repository.py`,
 `lifecycle.py`, `service.py`; test `test_normalization_service.py`):

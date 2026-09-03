@@ -234,6 +234,103 @@ loads it; `evaluation.scoring.score_run({case_id: InvoiceExtraction})` grades a
 provider's output — overall / critical-field / line-item accuracy, per category.
 See `evaluation/README.md`.
 
+## Normalization API (Stage 4)
+
+Stage 4 turns the raw, immutable output of a **completed** extraction into
+separate canonical values, recording a structured field error wherever a value
+is invalid or ambiguous. It is fully deterministic and offline — no AI, no
+network, no provider to configure. Full spec in
+[`../docs/stage-4-normalization.md`](../docs/stage-4-normalization.md).
+
+Every path hangs off a Stage 3 extraction attempt:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/documents/{document_id}/extractions/{extraction_id}/normalizations` | start the first normalization (`201`) |
+| `POST` | `/documents/{document_id}/extractions/{extraction_id}/normalizations/retry` | run a new attempt after a technical failure (`201`) |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations` | every attempt, newest first |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations/latest` | the most recent attempt |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}` | one specific attempt |
+
+- `404 DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` for an unknown or
+  wrong-document id; `404 NORMALIZATION_NOT_FOUND` when the extraction has no
+  matching attempt.
+- `409` when the extraction cannot legally transition:
+  `EXTRACTION_NOT_COMPLETED` (source extraction has not completed),
+  `NORMALIZATION_IN_PROGRESS`, `EXTRACTION_ALREADY_NORMALIZED` (a second
+  `start`), `NORMALIZATION_FAILED` (a `start` after a technical failure — use
+  `retry`), `NORMALIZATION_NOT_FAILED` (`retry` when the last attempt did not
+  fail technically).
+- A normalization that *runs* and hits a technical failure is still `201` — the
+  attempt was created; its `status` is `FAILED` and `failure_code` /
+  `failure_message` (both client-safe) say why. Use `retry` to try again.
+- A **field-level** normalization error is not a technical failure: the attempt
+  is `COMPLETED` and the error travels inside `data.errors` with a stable
+  `field_path`, the stringified `raw_value`, a safe `code`
+  (`invalid_date`, `invalid_currency`, `unknown_currency`, `invalid_number`,
+  `ambiguous_number`, `text_too_long`), and a safe `message`.
+
+**Request** (`NormalizationStartRequest`) — start and retry take an empty JSON
+body (`{}` or none). There are no parameters; unknown keys are rejected with
+`422 VALIDATION_ERROR`.
+
+**Response** (`InvoiceNormalizationResult`):
+
+```jsonc
+{
+  "normalization_id": "…", "extraction_id": "…", "attempt_number": 1,
+  "status": "PROCESSING | COMPLETED | FAILED",
+  "started_at": "…Z", "completed_at": "…Z" | null,
+  "created_at": "…Z", "updated_at": "…Z",
+  "failure_code": null, "failure_message": null,
+  "data": {
+    "invoice_number": "INV-1",
+    "invoice_date": "2026-01-15",        // canonical YYYY-MM-DD, or null
+    "currency": "EUR",                    // approved ISO 4217 code, or null
+    "total_amount": "119.00",            // decimal as a JSON string
+    "…": "… every canonical scalar, always present, single value or null …",
+    "line_items": [
+      { "description": "Widget", "quantity": "2",
+        "unit_price": "10.00", "line_total": "20.00" }
+    ],
+    "errors": [
+      { "field_path": "due_date", "raw_value": "15/13/2026",
+        "code": "invalid_date", "message": "…client-safe…" }
+    ]
+  }
+}
+```
+
+- Normalized fields hold a **single canonical value or `null`** and carry **no
+  confidence** (it stays on the Stage 3 record). There is no `document_id` and
+  no raw provider payload in the response.
+- Money and quantity values serialize as JSON strings (exact decimals, sign and
+  scale preserved, never rounded).
+- The normalized record references its source `extraction_id` and never mutates
+  it or the original PDF. Schema changes go through Alembic
+  (`0003_normalization_tables`).
+
+### Normalization lifecycle
+
+`NormalizationService` (`app/services/processing/normalization/`) drives one
+attempt:
+
+```text
+COMPLETED extraction ─> PROCESSING ─> COMPLETED | FAILED
+FAILED normalization ─(retry)─> PROCESSING ─> COMPLETED | FAILED
+```
+
+- `PROCESSING` is committed **before** the deterministic engine runs. A
+  `SELECT ... FOR UPDATE` on the source extraction row plus a partial unique
+  index keep at most one active attempt per extraction; a lost race becomes a
+  `409`.
+- Only an infrastructure problem (source extraction unreadable, a database write
+  failure, an unexpected engine exception) makes an attempt `FAILED`, and it
+  rolls back with no partial result and a generic `NORMALIZATION_FAILED` reason.
+  History is preserved as `attempt_number` 1, 2, 3, …
+- Extraction and normalization stay independently callable; normalization never
+  changes the document or extraction rows.
+
 ## Tests
 
 ```bash
@@ -263,11 +360,15 @@ app/
   models/
     document.py      the documents table
     extraction.py    invoice_extractions + invoice_line_items tables
+    normalization.py invoice_normalizations + normalized line items + field errors
   schemas/
     document.py      DocumentRead - public metadata (no file_location / file_hash)
-    extraction.py             internal invoice extraction contract ({value, confidence})
-    extraction_persistence.py flat <-> nested mapping for the extraction tables
-    extraction_api.py         extraction request + public response models
+    extraction.py                internal invoice extraction contract ({value, confidence})
+    extraction_persistence.py    flat <-> nested mapping for the extraction tables
+    extraction_api.py            extraction request + public response models
+    normalization.py             internal normalized invoice contract (single value | null, no confidence)
+    normalization_persistence.py nested <-> flat mapping for the normalization tables
+    normalization_api.py         normalization request + public response models
   services/
     pdf.py           inspect_pdf: signature + readability + page-count check
     storage/
@@ -281,10 +382,18 @@ app/
         provider.py        ExtractionProvider interface + ProviderError hierarchy
         fake.py            FakeExtractionProvider - deterministic offline double
         openai_provider.py OpenAIExtractionProvider - real adapter (GPT-5-mini)
+      normalization/
+        normalizers.py    deterministic field normalizers (date / currency / number / text)
+        iso4217.py        vendored approved-currency allow-list (no network)
+        engine.py         normalize_extraction - contract -> canonical, collects field errors
+        lifecycle.py      valid extraction / normalization-attempt transitions
+        repository.py      NormalizationRepository - reads/writes the normalization tables
+        service.py         NormalizationService - start / retry, PROCESSING -> COMPLETED|FAILED
   api/
-    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor)
+    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service)
     documents.py     POST /documents, GET /documents[/{id}[/file]]
     extractions.py   POST/GET /documents/{id}/extractions[...]
+    normalizations.py POST/GET /documents/{id}/extractions/{eid}/normalizations[...]
     health.py        health endpoints
     router.py        aggregate router
 evaluation/          synthetic invoice set + ground truth (extraction accuracy)

@@ -582,8 +582,29 @@ step. Detail for each step is filled in as the step is worked.
     unique index backs the `FOR UPDATE` serialization for concurrent starts
     (`IntegrityError` → `409`). No AI or network call occurs (a test blocks
     `httpx` and the run still completes).
-12. **Add the API endpoints.** Start normalization; retrieve latest or specific
-    attempt; retry and history where useful. Clear `404` and `409` responses.
+12. **Add the API endpoints.** *(Done — `backend/app/api/normalizations.py`,
+    dependency `get_normalization_service` in `app/api/deps.py`, registered in
+    `app/api/router.py`; test `test_normalizations_api.py`; documented in the
+    backend README "Normalization API (Stage 4)" section.)* All paths hang off a
+    Stage 3 extraction attempt:
+    `POST /documents/{id}/extractions/{eid}/normalizations` (start, `201`),
+    `POST …/normalizations/retry` (`201`),
+    `GET …/normalizations` (history, newest first),
+    `GET …/normalizations/latest`,
+    `GET …/normalizations/{nid}`. The response is `InvoiceNormalizationResult`
+    (canonical scalars + `line_items` + `errors`, no confidence, no
+    `document_id`, no diagnostics); the request body is empty
+    (`extra="forbid"`, `422 VALIDATION_ERROR` on unknown keys). `404` is
+    `DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND`;
+    `409` surfaces the lifecycle codes from step 11
+    (`EXTRACTION_NOT_COMPLETED`, `NORMALIZATION_IN_PROGRESS`,
+    `EXTRACTION_ALREADY_NORMALIZED`, `NORMALIZATION_FAILED`,
+    `NORMALIZATION_NOT_FAILED`). A normalization that runs but fails technically
+    is still `201` with `status = FAILED` and a client-safe `failure_code` /
+    `failure_message`; a field-level error is not a failure and rides inside
+    `data.errors`. Raw exceptions, paths, and secrets never reach a response
+    (the shared error envelope collapses anything unexpected to a generic
+    `500`). Stage 2 and Stage 3 endpoints are unchanged.
 13. **Connect the pipeline** as `upload -> extraction -> normalization`, keeping
     extraction and normalization independently callable during development. Do
     not pull Stage 5 validation into Stage 4.

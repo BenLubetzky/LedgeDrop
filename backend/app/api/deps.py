@@ -27,6 +27,7 @@ from app.services.processing.extraction.preprocessing import (
     prepare_document,
 )
 from app.services.processing.extraction.provider import ExtractionProvider, ProviderError
+from app.services.processing.normalization import NormalizationService
 from app.services.storage import LocalFileStorage
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "get_extraction_service",
     "get_extractor",
     "get_prepared_result_producer",
+    "get_normalization_service",
 ]
 
 _storage = LocalFileStorage(settings.upload_directory)
@@ -50,6 +52,17 @@ def get_extraction_service(
 ) -> ExtractionService:
     """Build an :class:`ExtractionService` bound to the request's session."""
     return ExtractionService(db)
+
+
+def get_normalization_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> NormalizationService:
+    """Build a :class:`NormalizationService` bound to the request's session.
+
+    Normalization is fully deterministic and offline, so - unlike extraction -
+    there is no provider to inject.
+    """
+    return NormalizationService(db)
 
 
 def _build_extractor() -> ExtractionProvider:
