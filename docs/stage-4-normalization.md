@@ -344,10 +344,37 @@ Other requirements still in force:
 
 ## Schemas
 
-Provide separate internal, persistence, request, and public response schemas.
-Reject unknown keys. Serialize decimals without floating-point artifacts. The
-public response exposes normalized values, structured field errors, the source
-extraction reference, status, and timestamps only.
+*(Done — step 5.)* Four layers, mirroring the Stage 3 schema modules:
+
+- **Internal contract** — `app/schemas/normalization.py` (`NormalizedInvoice`,
+  `NormalizedLineItem`, `NormalizationError` / `NormalizationErrorCode`,
+  `NormalizedInvoiceResult`). Built in step 1; unchanged here.
+- **Persistence bridge** — `app/schemas/normalization_persistence.py`.
+  `scalar_columns` / `line_item_rows` / `error_rows` (and
+  `normalized_invoice_to_columns`) flatten a validated `NormalizedInvoice` into
+  `invoice_normalizations` / `invoice_normalized_line_items` /
+  `invoice_normalization_errors` column values — one column per scalar, no
+  `_value` / `_confidence` split. `normalized_invoice_from_rows` /
+  `normalized_invoice_from_attempt` rebuild the nested contract and re-validate
+  it (date shape, currency shape, decimal typing, closed error-code set,
+  error-path validity, "errored field is null"). Persisted line items are
+  ordered by position and positions must be unique and contiguous from zero.
+  Field names come from the
+  contract models, so the mapping cannot drift; a test asserts every produced
+  key is a real ORM column.
+- **Request** — `app/schemas/normalization_api.py` `NormalizationStartRequest`:
+  empty body, `extra="forbid"`, one model for both start and retry.
+- **Public response** — `app/schemas/normalization_api.py`
+  `InvoiceNormalizationResult` (`from_attributes=True`, `from_attempt(attempt)`
+  classmethod). Exposes `normalization_id`, `extraction_id`, `attempt_number`,
+  `status`, the four timestamps (serialized UTC `...Z`), `failure_code` /
+  `failure_message`, and `data: NormalizedInvoice` (canonical scalars +
+  `line_items` + `errors`). No confidence, no `document_id`, no raw provider
+  payload, no internal diagnostics. Unknown keys, naive timestamps, and
+  status/failure-field inconsistencies are rejected. Decimals serialize as
+  JSON strings.
+
+Test: `test_normalization_schemas.py`.
 
 ## Processing orchestration and statuses
 
@@ -430,8 +457,11 @@ step. Detail for each step is filled in as the step is worked.
    index; downgrade drops them cleanly. Verified up / down / re-up on a
    throwaway database with seeded Stage 2/3 rows; `alembic check` reports no
    drift.
-5. **Create the schemas.** Separate internal, persistence, request, and public
-   response models. Reject unknown keys; serialize decimals cleanly.
+5. **Create the schemas.** *(Done — see "Schemas" above.)* Internal contract
+   (step 1), persistence bridge (`normalization_persistence.py`), request +
+   public response (`normalization_api.py`). Unknown keys rejected; decimals
+   serialize as strings; the response carries no confidence or diagnostics.
+   Test `test_normalization_schemas.py`.
 6. **Implement the deterministic normalizers.** Small units for dates,
    currency, money, quantities, general text, invoice numbers, and tax
    identifiers. Each returns a normalized value or a structured error and never
