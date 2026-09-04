@@ -56,6 +56,7 @@ from app.schemas.normalization import NormalizationErrorCode
 
 if TYPE_CHECKING:
     from app.models.extraction import ExtractionAttempt
+    from app.models.validation import ValidationAttempt
 
 
 def _utcnow() -> datetime:
@@ -200,6 +201,14 @@ class NormalizationAttempt(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="NormalizationFieldError.field_path",
+    )
+    # Stage 5 validation attempts over this normalization attempt, oldest first.
+    # Added in Stage 5; does not affect any Stage 4 behaviour.
+    validations: Mapped[list[ValidationAttempt]] = relationship(
+        back_populates="source_normalization",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ValidationAttempt.attempt_number",
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

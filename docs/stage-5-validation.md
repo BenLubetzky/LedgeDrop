@@ -5,17 +5,23 @@ high-level summary and the guardrails; this file holds the boundary (step 1),
 the pinned validation policies (step 2), the validation contract and rule
 catalogue these imply, the implementation order, and the verification list.
 
-**Status.** Steps 1–4 are done: Parts 1–3 of this document, plus the internal
-validation contract in `backend/app/schemas/validation.py` (with
+**Status.** Steps 1–7 are done: Parts 1–3 of this document (Part 2's §2.6 carries
+the step 5 missing-confidence decision), plus the internal validation contract in
+`backend/app/schemas/validation.py` (with
 `backend/tests/test_validation_contract.py`, which carries the §1.7 boundary
-tests) and the formal rule catalogue in
+tests), the formal rule catalogue in
 `backend/app/schemas/validation_catalogue.py` (with
-`backend/tests/test_validation_catalogue.py`). Steps 5–14 are **not authorized**
-— do not start any of them, or write engine / persistence / migration / API
-code, until the user explicitly authorizes that step. No ⚠ policy value below is
-referenced by any code yet — the catalogue names its policy dependencies
-(`confidence_threshold`, `high_value_policy`, …) without embedding a value; they
-live only here until step 8.
+`backend/tests/test_validation_catalogue.py`), the persistence models in
+`backend/app/models/validation.py` (with `backend/tests/test_validation_model.py`),
+and the migration `backend/alembic/versions/0004_validation_tables.py` (verified
+up / down / re-up with Stage 2–4 data preserved and `alembic check` clean).
+Step 5 added no code — it is a pinned policy and its confidence read is wired in
+step 9. Steps 8–14 are **not authorized** — do not start any of them, or write
+the engine / service / API code, until the user explicitly authorizes that step.
+No ⚠ policy value below is referenced by any code yet —
+the catalogue names its policy dependencies (`confidence_threshold`,
+`high_value_policy`, …) without embedding a value; they live only here until
+step 8.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
 They are deliberately conservative and self-documenting (every
@@ -292,10 +298,27 @@ If `invoice_number`, `vendor_name`/`vendor_tax_id`, `currency`, or
 sibling `document_id` is a business fact, not an internal diagnostic; ⚠ the
 reviewer should confirm this is acceptable before there is multi-tenancy.
 
-### 2.6 Confidence thresholds
+### 2.6 Confidence thresholds and the missing-confidence decision (step 5)
 
-Evaluated for the five required/critical fields only, using the per-field
-confidence from the source extraction (`<field>_confidence`).
+**The limitation.** Per-field confidence is a `Decimal` in `[0, 1]` or `null`
+(Stage 3). Whether a provider supplies a *calibrated* per-field number is a trait
+of the provider, not of the invoice: the current OpenAI GPT-5-mini adapter
+records `null` for **every** field, while the deterministic fake provider carries
+non-null synthetic confidences for test coverage. Stage 5 must fix what a
+`null` confidence means for the
+`low_confidence_critical_field` check.
+
+**Options considered.**
+
+| Option | Behaviour | Why not |
+|---|---|---|
+| *Not evaluated* — skip silently | no finding, no trace | the decision stage cannot tell "confidence unknown" from "confidence fine"; an entire provider's invoices would carry no confidence signal and nothing would say why. |
+| *Disable the rule* — per provider / config | `low_confidence_critical_field` runs only when confidences exist | Stage 5 output would then depend on runtime provider configuration, breaking determinism (§2.8) and the closed, provider-independent rule catalogue. |
+| **Record a finding** *(chosen)* | `null` confidence emits `critical_field_confidence_unavailable` (`info`) | for a present value, the confidence check always resolves to exactly one of three states; the decision stage can distinguish unavailable confidence from confidence at or above the threshold. The same deterministic policy applies to every provider. |
+
+**Decision.** A `null` confidence is **never** treated as high or low. Evaluated
+for the five required/critical fields only, using the per-field confidence from
+the source extraction (`<field>_confidence`).
 
 ```
 critical_field_confidence_min = 0.70        ⚠
@@ -309,18 +332,31 @@ Per critical field whose **value is present**:
 | `< 0.70` | `low_confidence_critical_field` (`context.confidence` = actual) | `warning` |
 | `null` | `critical_field_confidence_unavailable` | `info` |
 
-`null` confidence is **never** treated as high or low. It produces its own
-`info` finding so the decision stage knows the check could not be made — this
-is the resolution of step 5, and it means the rule always runs and always
-produces a consistent result regardless of provider. (The current OpenAI
-adapter reports `null` for every field, so on OpenAI-extracted invoices this
-rule yields five `info` findings and no `warning`; the deterministic fake
-provider carries real confidences and exercises the `warning` path.)
-
 A critical field that is *absent* gets `missing_required_field` only — no
-confidence finding is added for a field with no value.
+confidence finding is added for a field with no value. Non-critical field
+confidence is not evaluated in the MVP.
 
-Non-critical field confidence is not evaluated in the MVP.
+**Consequence by provider.** On OpenAI-extracted invoices every critical field
+with a value yields one `critical_field_confidence_unavailable` (`info`) and no
+`low_confidence_critical_field`; synthetic fake-provider fixtures exercise the
+non-null branches, including the `warning` path. Outputs correctly differ with
+their confidence inputs, while the rule semantics remain provider-independent.
+Either way the `summary` counts stay well defined and the decision stage applies
+its own policy.
+
+**Confidence source and the join.** The confidences come from the *one*
+`invoice_extractions` row that produced the normalization under validation —
+`invoice_normalizations.extraction_id`, i.e. that specific extraction attempt,
+not "the latest extraction". Stage 5 reads only the five
+`<critical_field>_confidence` columns (`invoice_number_confidence`,
+`invoice_date_confidence`, `vendor_name_confidence`, `currency_confidence`,
+`total_amount_confidence`) and no other extraction value (§1.2). Each column is
+nullable with a `0 <= x <= 1` CHECK, so a loaded value is a `Decimal` in range
+or `null` with no further parsing. The relational lookup is wired in **step 9**
+(the engine), where the normalization attempt and its related source extraction
+are loaded together: step 5 fixes the policy, step 9 performs the read. The
+critical-field set itself lives in the step 8 `policy` module (it is the ⚠
+required set of §2.1), so no Stage 5 code names it before then.
 
 ### 2.7 High-value thresholds
 
@@ -509,19 +545,61 @@ Introduce no AI or external-network call at any step.
    conditional `normalization_error`), `skip_when`, `context_keys`, and the
    fixed client-safe `message` (§3.1). No ⚠ policy value is embedded — a rule
    that needs one lists a policy token in `inputs`.
-5. **Resolve confidence limitations.** *(Decided — §2.6: `null` confidence →
-   `critical_field_confidence_unavailable` (`info`), never treated as a value.)*
-   Implement the join to `invoice_extractions.<field>_confidence`.
-6. **Add persistence.** `invoice_validations` (one row per attempt, keyed
-   `(normalization_id, attempt_number)`, partial unique index for one active
-   attempt, status/failure CHECKs mirroring Stage 4) and
-   `invoice_validation_findings` (`rule`, `severity`, `field_path`, `expected`,
-   `actual`, `message`, `context` JSONB; `field_path` CHECK reusing the Stage 4
-   shape or `null`). `NormalizationAttempt` gains a `validations` relationship,
-   cascade-on-document-delete. No Stage 4 behaviour changes.
-7. **Add the database migration.** `0004_validation_tables` (down_revision
-   `0003_normalization_tables`); verify up / down / re-up on a throwaway
-   database with seeded Stage 2–4 rows intact; `alembic check` clean.
+5. **Resolve confidence limitations.** *(Done — §2.6.)* A `null` per-field
+   confidence emits `critical_field_confidence_unavailable` (`info`); it is never
+   read as high or low, and `low_confidence_critical_field` is never disabled or
+   silently skipped, so Stage 5 stays deterministic and provider-independent
+   (OpenAI → `info` for each present critical value; synthetic fake-provider
+   fixtures exercise the non-null branches). The confidence read uses the five
+   `<critical_field>_confidence` columns on
+   the `invoice_extractions` row named by `invoice_normalizations.extraction_id`;
+   it is wired in step 9 (the engine), after the step 8 `policy` module supplies
+   the critical-field set. No code is added in this step.
+6. **Add persistence.** *(Done — `app/models/validation.py` +
+   `tests/test_validation_model.py`.)* `invoice_validations` (ORM
+   `ValidationAttempt`): one row per attempt, keyed
+   `(normalization_id, attempt_number)` via
+   `uq_invoice_validations_normalization_id_attempt_number`; partial unique index
+   `uq_invoice_validations_one_active_per_normalization`
+   (`WHERE status = 'PROCESSING'`) for one active attempt; `attempt_number >= 1`
+   and the PROCESSING/COMPLETED/FAILED status-vs-`completed_at`/`failure_*` CHECK
+   copied from `invoice_normalizations`; FK to
+   `invoice_normalizations.normalization_id` `ON DELETE CASCADE`. It carries
+   lifecycle + technical-failure columns only — no invoice data, no verdict; the
+   `ValidationSummary` counts are re-derived from the finding rows on read, never
+   stored. `invoice_validation_findings` (ORM `ValidationFindingRow`): `position`
+   (0-based, `>= 0`, unique per validation — the engine emits in rule-catalogue
+   order so the stored list is reproducible), `rule` / `severity` native enums
+   storing the public codes (`missing_required_field` …, `error|warning|info`),
+   nullable `field_path` with a CHECK reusing the Stage 4 scalar list +
+   `line_items.<i>.<field>` regex or `NULL`, `expected` / `actual` as nullable
+   client-safe display text (a `Decimal` is stored as its canonical string; the
+   contract's `str | Decimal` union serialises identically), `message` text, and
+   `context` JSONB (default `{}`), with contract-valid `Decimal` and UUID values
+   losslessly converted to JSON strings and binary floats rejected at the bind
+   boundary; `failure_code` is bounded to 64 characters as in Stage 4. FK to
+   `invoice_validations.validation_id`
+   `ON DELETE CASCADE`. `NormalizationAttempt` gains a `validations` relationship
+   (`cascade="all, delete-orphan"`, `passive_deletes=True`), so a document delete
+   cascades documents → extractions → normalizations → validations → findings. No
+   Stage 4 behaviour changes; tables are created for tests via
+   `Base.metadata.create_all`, the Alembic migration is step 7.
+7. **Add the database migration.** *(Done —
+   `backend/alembic/versions/0004_validation_tables.py`, `down_revision
+   0003_normalization_tables`.)* `upgrade()` creates `invoice_validations`,
+   `invoice_validation_findings` and the `validation_status` / `validation_rule`
+   / `finding_severity` enum types; `downgrade()` drops exactly those objects
+   (and the three enum types explicitly, since `DROP TABLE` leaves native enums
+   behind) and touches no Stage 2–4 object. Verified on a throwaway database:
+   upgrade to `0003`, seed representative Stage 2–4 rows (document + extraction +
+   line item + normalization + normalized line item + normalization error),
+   `sha256` snapshot; upgrade to `head` — Stage 5 tables and enums present, the
+   new tables accept an attempt + findings (FK, `position`/`field_path` CHECKs,
+   `context` JSONB), snapshot unchanged; downgrade to `0003` — Stage 5 tables and
+   enums gone, snapshot still unchanged; re-upgrade to `head` — clean, snapshot
+   unchanged. `alembic check` reports "No new upgrade operations detected"
+   (including the by-name CHECK-constraint comparison), so the migration and
+   `app/models/validation.py` do not drift.
 8. **Implement deterministic rule functions.** One module of pure functions
    plus `policy.py` (the §2 constants and the high-value map). Each rule takes
    the normalized invoice (+ confidence, + candidates, + run date where needed)

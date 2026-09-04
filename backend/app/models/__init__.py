@@ -7,6 +7,13 @@ from app.models.normalization import (
     NormalizationLineItem,
     NormalizationStatus,
 )
+from app.models.validation import (
+    FindingSeverity,
+    ValidationAttempt,
+    ValidationFindingRow,
+    ValidationRule,
+    ValidationStatus,
+)
 
 __all__ = [
     "Document",
@@ -19,4 +26,9 @@ __all__ = [
     "NormalizationFieldError",
     "NormalizationLineItem",
     "NormalizationStatus",
+    "FindingSeverity",
+    "ValidationAttempt",
+    "ValidationFindingRow",
+    "ValidationRule",
+    "ValidationStatus",
 ]

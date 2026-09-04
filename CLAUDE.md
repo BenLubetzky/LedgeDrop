@@ -108,7 +108,7 @@ contract, pinned policies, persistence layout, API, verification map — in
   network" is proven by a `socket`-blocked engine run and a source scan of the
   normalization package.
 
-**Stage 5 (deterministic invoice validation): steps 1–4 done, steps 5–14 NOT
+**Stage 5 (deterministic invoice validation): steps 1–7 done, steps 8–14 NOT
 authorized.** Stage 5 will consume the exact completed Stage 4 normalization
 attempt, evaluate a closed catalogue of deterministic rules, and record
 structured findings. It reports **facts only** — a rule violation completes
@@ -133,9 +133,29 @@ are not referenced by any code. Step 4 (the rule catalogue) is
 `ValidationRule` (import-time checked against the enum) giving each rule's
 inputs, `field_path` shape, severity shape, skip conditions, `context` keys, and
 fixed client-safe message; it embeds no ⚠ value, only a policy token per
-dependent rule. Steps 5–14 (persistence, migration, engine, service, API,
-pipeline, tests) are **not authorized** — do not start any of them until the
-user explicitly says so.
+dependent rule. Step 5 (confidence limitations) is a pinned decision in §2.6,
+no code: a `null` per-field confidence emits `critical_field_confidence_
+unavailable` (`info`) and is never read as high/low or used to disable the
+`low_confidence_critical_field` check, keeping the rule semantics deterministic
+and provider-independent; outputs still reflect each provider's stored
+confidence inputs. The read of the five `<critical_field>_confidence` columns
+on the `invoice_extractions` row (via `invoice_normalizations.extraction_id`) is
+wired in step 9. Step 6 (persistence) is `backend/app/models/validation.py` +
+`backend/tests/test_validation_model.py` — `invoice_validations` (ORM
+`ValidationAttempt`, keyed `(normalization_id, attempt_number)`, partial unique
+index for one active `PROCESSING` attempt, status/failure CHECKs copied from
+Stage 4, lifecycle columns only — summary counts re-derived on read, never
+stored) and `invoice_validation_findings` (ORM `ValidationFindingRow`:
+`position`-ordered, `rule`/`severity` native enums of the public codes, nullable
+`field_path` with the Stage 4 shape CHECK or `NULL`, `expected`/`actual` display
+text, `context` JSONB); `NormalizationAttempt` gains a cascading `validations`
+relationship. JSONB binding losslessly stringifies contract `Decimal`/UUID
+values and rejects binary floats. Step 7 (migration) is
+`backend/alembic/versions/0004_validation_tables.py` (`down_revision
+0003_normalization_tables`), verified up / down / re-up on a throwaway database
+with seeded Stage 2–4 rows byte-unchanged and `alembic check` clean. Steps 8–14
+(engine, service, API, pipeline, tests) are **not authorized** — do not start
+any of them until the user explicitly says so.
 
 ## Technology decisions
 
