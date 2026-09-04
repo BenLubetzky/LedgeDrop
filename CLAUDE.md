@@ -108,7 +108,7 @@ contract, pinned policies, persistence layout, API, verification map — in
   network" is proven by a `socket`-blocked engine run and a source scan of the
   normalization package.
 
-**Stage 5 (deterministic invoice validation): steps 1–7 done, steps 8–14 NOT
+**Stage 5 (deterministic invoice validation): steps 1–8 done, steps 9–14 NOT
 authorized.** Stage 5 will consume the exact completed Stage 4 normalization
 attempt, evaluate a closed catalogue of deterministic rules, and record
 structured findings. It reports **facts only** — a rule violation completes
@@ -126,8 +126,9 @@ internal contract) is `backend/app/schemas/validation.py` +
 decision vocabulary, `Decimal` serialised as strings, no `float` anywhere.
 Policy values marked ⚠ in the spec (required-field set, reconciliation
 tolerances, date windows, confidence threshold `0.70`, high-value thresholds,
-duplicate key) are provisional defaults for review, live only in that doc, and
-are not referenced by any code. Step 4 (the rule catalogue) is
+duplicate key) are provisional defaults for review; as of step 8 they live in
+`backend/app/services/processing/validation/policy.py` (vendored, not env
+config) and nowhere else. Step 4 (the rule catalogue) is
 `backend/app/schemas/validation_catalogue.py` +
 `backend/tests/test_validation_catalogue.py` — one `RuleSpec` per
 `ValidationRule` (import-time checked against the enum) giving each rule's
@@ -153,9 +154,19 @@ relationship. JSONB binding losslessly stringifies contract `Decimal`/UUID
 values and rejects binary floats. Step 7 (migration) is
 `backend/alembic/versions/0004_validation_tables.py` (`down_revision
 0003_normalization_tables`), verified up / down / re-up on a throwaway database
-with seeded Stage 2–4 rows byte-unchanged and `alembic check` clean. Steps 8–14
-(engine, service, API, pipeline, tests) are **not authorized** — do not start
-any of them until the user explicitly says so.
+with seeded Stage 2–4 rows byte-unchanged and `alembic check` clean. Step 8 is
+`backend/app/services/processing/validation/{policy,rules}.py` (+
+`tests/test_validation_{policy,rules}.py`): `policy.py` now holds every ⚠ §2
+constant (tolerance `0.01`, `line_sum_tolerance(n)=max(0.01,0.01·n)`, date
+windows `365`/`10y`, confidence min `0.70`, high-value map + `10000` default,
+required/critical field set) as `Decimal`, and nowhere else; `rules.py` has one
+pure `check_<rule>(RuleContext)->list[ValidationFinding]` per catalogue member
+(message + default severity from the catalogue), all arithmetic in an
+input-sized `Decimal` context so no contract-valid value rounds and no `float`
+appears, immutable `RULE_FUNCTIONS` +
+`run_rules` covering every rule in `position` order. Steps 9–14 (engine, service,
+API, pipeline, tests) are **not authorized** — do not start any of them until
+the user explicitly says so.
 
 ## Technology decisions
 

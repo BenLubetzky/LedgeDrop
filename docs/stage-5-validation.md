@@ -5,7 +5,7 @@ high-level summary and the guardrails; this file holds the boundary (step 1),
 the pinned validation policies (step 2), the validation contract and rule
 catalogue these imply, the implementation order, and the verification list.
 
-**Status.** Steps 1–7 are done: Parts 1–3 of this document (Part 2's §2.6 carries
+**Status.** Steps 1–8 are done: Parts 1–3 of this document (Part 2's §2.6 carries
 the step 5 missing-confidence decision), plus the internal validation contract in
 `backend/app/schemas/validation.py` (with
 `backend/tests/test_validation_contract.py`, which carries the §1.7 boundary
@@ -13,15 +13,15 @@ tests), the formal rule catalogue in
 `backend/app/schemas/validation_catalogue.py` (with
 `backend/tests/test_validation_catalogue.py`), the persistence models in
 `backend/app/models/validation.py` (with `backend/tests/test_validation_model.py`),
-and the migration `backend/alembic/versions/0004_validation_tables.py` (verified
-up / down / re-up with Stage 2–4 data preserved and `alembic check` clean).
-Step 5 added no code — it is a pinned policy and its confidence read is wired in
-step 9. Steps 8–14 are **not authorized** — do not start any of them, or write
-the engine / service / API code, until the user explicitly authorizes that step.
-No ⚠ policy value below is referenced by any code yet —
-the catalogue names its policy dependencies (`confidence_threshold`,
-`high_value_policy`, …) without embedding a value; they live only here until
-step 8.
+the migration `backend/alembic/versions/0004_validation_tables.py` (verified
+up / down / re-up with Stage 2–4 data preserved and `alembic check` clean), and
+the pinned policy + pure rule functions in
+`backend/app/services/processing/validation/{policy,rules}.py` (with
+`backend/tests/test_validation_{policy,rules}.py`). Step 5 added no code — it is a
+pinned policy and its confidence read is wired in step 9. Steps 9–14 are **not
+authorized** — do not start any of them, or write the engine / service / API
+code, until the user explicitly authorizes that step. Every ⚠ value now lives in
+`policy.py` (step 8) and nowhere else; the catalogue still embeds none.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
 They are deliberately conservative and self-documenting (every
@@ -600,10 +600,28 @@ Introduce no AI or external-network call at any step.
    unchanged. `alembic check` reports "No new upgrade operations detected"
    (including the by-name CHECK-constraint comparison), so the migration and
    `app/models/validation.py` do not drift.
-8. **Implement deterministic rule functions.** One module of pure functions
-   plus `policy.py` (the §2 constants and the high-value map). Each rule takes
-   the normalized invoice (+ confidence, + candidates, + run date where needed)
-   and returns zero or more findings. `Decimal` only; independently unit-tested.
+8. **Implement deterministic rule functions.** *(Done —
+   `app/services/processing/validation/{policy,rules}.py` +
+   `tests/test_validation_{policy,rules}.py`.)* `policy.py` holds every ⚠ §2
+   constant and nothing else — `REQUIRED_FIELDS`/`CRITICAL_FIELDS` (derived from
+   `extraction.CRITICAL_FIELDS` in canonical order), `RECONCILIATION_TOLERANCE`
+   `0.01`, `line_sum_tolerance(n) = max(0.01, 0.01·n)`, `DUE_DATE_MAX_GAP_DAYS`
+   `365`, `INVOICE_DATE_MAX_AGE_YEARS` `10` + `earliest_plausible_invoice_date`,
+   `CRITICAL_FIELD_CONFIDENCE_MIN` `0.70`, and the immutable
+   `HIGH_VALUE_THRESHOLDS` map + `high_value_threshold(currency)` default — all
+   `Decimal`, each tagged with its open-question number. `rules.py` has one pure
+   `check_<rule>(RuleContext) -> list[ValidationFinding]` per catalogue member
+   (`RuleContext` = normalized invoice + `run_date` + per-critical-field
+   `confidence` + `duplicate_candidates`); `message`/default `severity` come from
+   the step 4 catalogue, thresholds from `policy`. Every sum/product/difference
+   runs in an input-sized `Decimal` context so even values beyond 50 digits are
+   not rounded (§2.9); date-gap comparison avoids overflow at year 9999. No
+   `float` is produced or accepted. The immutable `RULE_FUNCTIONS` map covers every
+   `ValidationRule` in order (import-time checked) and `run_rules(ctx)`
+   concatenates them — the persisted `position` order. Tests cover each rule's
+   pass/fail and both sides of every ⚠ tolerance edge, determinism, contract
+   validity of the output, a source scan and a `socket`-blocked run for "no
+   network".
 9. **Build the validation engine.** Load the normalization attempt, its errors,
    the confidence row, and the duplicate candidates; run every applicable rule;
    assemble and re-validate the `InvoiceValidation`.
