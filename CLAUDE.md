@@ -108,7 +108,7 @@ contract, pinned policies, persistence layout, API, verification map — in
   network" is proven by a `socket`-blocked engine run and a source scan of the
   normalization package.
 
-**Stage 5 (deterministic invoice validation): steps 1–3 done, steps 4–14 NOT
+**Stage 5 (deterministic invoice validation): steps 1–4 done, steps 5–14 NOT
 authorized.** Stage 5 will consume the exact completed Stage 4 normalization
 attempt, evaluate a closed catalogue of deterministic rules, and record
 structured findings. It reports **facts only** — a rule violation completes
@@ -127,9 +127,15 @@ decision vocabulary, `Decimal` serialised as strings, no `float` anywhere.
 Policy values marked ⚠ in the spec (required-field set, reconciliation
 tolerances, date windows, confidence threshold `0.70`, high-value thresholds,
 duplicate key) are provisional defaults for review, live only in that doc, and
-are not referenced by any code. Steps 4–14 (rule catalogue, persistence,
-migration, engine, service, API, pipeline, tests) are **not authorized** — do
-not start any of them until the user explicitly says so.
+are not referenced by any code. Step 4 (the rule catalogue) is
+`backend/app/schemas/validation_catalogue.py` +
+`backend/tests/test_validation_catalogue.py` — one `RuleSpec` per
+`ValidationRule` (import-time checked against the enum) giving each rule's
+inputs, `field_path` shape, severity shape, skip conditions, `context` keys, and
+fixed client-safe message; it embeds no ⚠ value, only a policy token per
+dependent rule. Steps 5–14 (persistence, migration, engine, service, API,
+pipeline, tests) are **not authorized** — do not start any of them until the
+user explicitly says so.
 
 ## Technology decisions
 

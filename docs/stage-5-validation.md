@@ -5,13 +5,17 @@ high-level summary and the guardrails; this file holds the boundary (step 1),
 the pinned validation policies (step 2), the validation contract and rule
 catalogue these imply, the implementation order, and the verification list.
 
-**Status.** Steps 1–3 are done: Parts 1–2 of this document, plus the internal
+**Status.** Steps 1–4 are done: Parts 1–3 of this document, plus the internal
 validation contract in `backend/app/schemas/validation.py` (with
 `backend/tests/test_validation_contract.py`, which carries the §1.7 boundary
-tests). Steps 4–14 are **not authorized** — do not start any of them, or write
-rule / engine / persistence / migration / API code, until the user explicitly
-authorizes that step. No ⚠ policy value below is referenced by any code yet;
-they live only here until step 8.
+tests) and the formal rule catalogue in
+`backend/app/schemas/validation_catalogue.py` (with
+`backend/tests/test_validation_catalogue.py`). Steps 5–14 are **not authorized**
+— do not start any of them, or write engine / persistence / migration / API
+code, until the user explicitly authorizes that step. No ⚠ policy value below is
+referenced by any code yet — the catalogue names its policy dependencies
+(`confidence_threshold`, `high_value_policy`, …) without embedding a value; they
+live only here until step 8.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
 They are deliberately conservative and self-documenting (every
@@ -390,7 +394,19 @@ reproducible.
 
 ---
 
-## Part 3 — Rule catalogue (preview; formalised in step 4)
+## Part 3 — Rule catalogue (step 4)
+
+Formalised as `backend/app/schemas/validation_catalogue.py`: one `RuleSpec` per
+`ValidationRule` member (declaration order, checked at import), each carrying the
+rule's inputs, `field_path` shape, severity shape, skip conditions, `context`
+keys, and message text. The module holds **no ⚠ policy value** — a `RuleSpec`
+that depends on one lists a policy token (`required_field_policy`,
+`reconciliation_tolerance`, `confidence_threshold`, `date_window_policy`,
+`high_value_policy`) in its `inputs`; step 8 combines the catalogue with the
+vendored `policy` module. `field_path` in a spec is a *shape*: `null`, a literal
+Stage 4 scalar name, or an angle-bracket template (`<required field>`,
+`<errored field>`, `<critical field>`, `line_items.<i>.line_total`) that step 8
+resolves to a concrete path per finding.
 
 | Code | Trigger (all inputs non-null unless noted) | `field_path` | Severity | Skips when |
 |---|---|---|---|---|
@@ -412,6 +428,54 @@ reproducible.
 
 The catalogue is **closed**: the finding `rule` field is an enum over exactly
 these codes (mirroring how `NormalizationErrorCode` is closed).
+
+### 3.1 Message text (step 4)
+
+Each finding carries one fixed, generic, client-safe sentence — no path, no
+secret, no stack trace, no raw payload, and no threshold value (the number the
+rule used goes in `context`). These are the exact strings in `RULE_MESSAGES`:
+
+| Code | Message |
+|---|---|
+| `missing_required_field` | A field required to process this invoice is missing. |
+| `normalization_error` | A field on this invoice could not be normalized to a valid value. |
+| `due_date_before_invoice_date` | The due date is earlier than the invoice date. |
+| `due_date_far_after_invoice_date` | The due date is much further after the invoice date than expected. |
+| `invoice_date_in_future` | The invoice date is in the future. |
+| `invoice_date_implausibly_old` | The invoice date is implausibly far in the past. |
+| `totals_do_not_reconcile` | The subtotal plus tax does not equal the invoice total. |
+| `line_item_amount_mismatch` | A line item's quantity times unit price does not equal its line total. |
+| `line_items_do_not_sum` | The line item totals do not add up to the reconciliation target. |
+| `line_item_sum_not_checked` | The line item totals were not checked because at least one line total is missing. |
+| `low_confidence_critical_field` | A critical field was extracted with low confidence. |
+| `critical_field_confidence_unavailable` | Extraction confidence is not available for a critical field. |
+| `probable_duplicate_invoice` | This invoice appears to duplicate another invoice already in the system. |
+| `high_value_invoice` | The invoice total meets or exceeds the high-value threshold. |
+| `no_line_items` | The invoice has no line items. |
+
+### 3.2 Finding `context` keys per rule (step 4)
+
+The `context` object records the rule-specific facts — including whichever ⚠
+constant the rule applied, so a finding explains itself even if the policy later
+changes. `RuleSpec.context_keys`:
+
+| Code | `context` keys | `expected` / `actual` |
+|---|---|---|
+| `missing_required_field` | — | — |
+| `normalization_error` | `code` | — |
+| `due_date_before_invoice_date` | — | `invoice_date` / `due_date` |
+| `due_date_far_after_invoice_date` | `max_gap_days` | `invoice_date` / `due_date` |
+| `invoice_date_in_future` | `run_date` | run date / `invoice_date` |
+| `invoice_date_implausibly_old` | `run_date`, `max_age_years` | earliest plausible date / `invoice_date` |
+| `totals_do_not_reconcile` | `delta`, `tolerance` | `subtotal + tax_amount` / `total_amount` |
+| `line_item_amount_mismatch` | `line_index`, `delta`, `tolerance` | `quantity × unit_price` / `line_total` |
+| `line_items_do_not_sum` | `target_basis`, `line_count`, `sum`, `delta`, `tolerance` | target / `Σ line_total` |
+| `line_item_sum_not_checked` | `line_count`, `missing_line_total_count` | — |
+| `low_confidence_critical_field` | `confidence`, `threshold` | — |
+| `critical_field_confidence_unavailable` | — | — |
+| `probable_duplicate_invoice` | `matches` (`[{document_id, normalization_id}]`), `tolerance` | — |
+| `high_value_invoice` | `threshold`, `currency` | — |
+| `no_line_items` | — | — |
 
 ---
 
@@ -438,8 +502,13 @@ Introduce no AI or external-network call at any step.
    string), or `null` — no bare `int`, no binary `float`; `context` rejects a
    `float` anywhere in its structure. Unknown keys rejected on every model.
    The §1.7 boundary tests live in `tests/test_validation_contract.py`.
-4. **Define the rule catalogue.** Formalise §3 as `ValidationRule` members and,
-   for each, a spec of inputs, skip conditions, severity, and message text.
+4. **Define the rule catalogue.** *(Done — `app/schemas/validation_catalogue.py`
+   + `tests/test_validation_catalogue.py`.)* One `RuleSpec` per `ValidationRule`
+   member (declaration order, import-time checked), each with `inputs`,
+   `field_path` shape, `severity` (`None` + `severity_note` only for the
+   conditional `normalization_error`), `skip_when`, `context_keys`, and the
+   fixed client-safe `message` (§3.1). No ⚠ policy value is embedded — a rule
+   that needs one lists a policy token in `inputs`.
 5. **Resolve confidence limitations.** *(Decided — §2.6: `null` confidence →
    `critical_field_confidence_unavailable` (`info`), never treated as a value.)*
    Implement the join to `invoice_extractions.<field>_confidence`.
