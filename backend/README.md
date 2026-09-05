@@ -333,25 +333,117 @@ FAILED normalization ─(retry)─> PROCESSING ─> COMPLETED | FAILED
 - Extraction and normalization stay independently callable; normalization never
   changes the document or extraction rows.
 
-### Processing pipeline
+## Validation API (Stage 5)
 
-`ProcessingPipeline` (`app/services/processing/pipeline.py`) composes the stages
-into `upload → extraction → normalization → (later) validation`. It adds no
-processing rules — it runs the extraction stage and then, only when it ended
-`COMPLETED`, the normalization stage, against one session.
+Stage 5 evaluates a closed catalogue of deterministic rules against a
+**completed** normalization attempt and records structured findings. It
+reports facts only — a rule violation completes the attempt with findings, not
+a technical failure — and never decides acceptance, rejection, or escalation
+(no `NEEDS_REVIEW` anywhere; that is a later decision stage). It is fully
+deterministic and offline — no AI, no network, no provider to configure. Full
+spec in [`../docs/stage-5-validation.md`](../docs/stage-5-validation.md).
+
+Every path hangs off a Stage 4 normalization attempt:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/documents/{document_id}/pipeline` | run extraction, then normalization (`201`) |
-| `POST` | `/documents/{document_id}/pipeline/retry` | retry a failed extraction, then normalize the new attempt (`201`) |
+| `POST` | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations` | start the first validation (`201`) |
+| `POST` | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations/retry` | run a new attempt after a technical failure (`201`) |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations` | every attempt, newest first |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations/latest` | the most recent attempt |
+| `GET`  | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations/{validation_id}` | one specific attempt |
 
-**Response** (`PipelineRunResult`) — the two per-stage public results side by
+- `404 DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND`
+  for an unknown or wrong-chain id; `404 VALIDATION_NOT_FOUND` when the
+  normalization has no matching attempt.
+- `409` when the normalization cannot legally transition:
+  `NORMALIZATION_NOT_COMPLETED` (source normalization has not completed),
+  `VALIDATION_IN_PROGRESS`, `NORMALIZATION_ALREADY_VALIDATED` (a second
+  `start`), `VALIDATION_FAILED` (a `start` after a technical failure — use
+  `retry`), `VALIDATION_NOT_FAILED` (`retry` when the last attempt did not
+  fail technically).
+- A validation that *runs* and hits a technical failure is still `201` — the
+  attempt was created; its `status` is `FAILED` and `failure_code` /
+  `failure_message` (both client-safe) say why. Use `retry` to try again.
+- A **rule violation** is not a technical failure: the attempt is `COMPLETED`
+  and the finding travels inside `data.findings` with a closed `rule` code, a
+  `severity` of `error | warning | info`, an optional Stage 4 `field_path`,
+  client-safe `expected` / `actual` values, a fixed `message`, and a `context`
+  object.
+
+**Request** (`ValidationStartRequest`) — start and retry take an empty JSON
+body (`{}` or none). There are no parameters; unknown keys are rejected with
+`422 VALIDATION_ERROR`.
+
+**Response** (`InvoiceValidationResult`):
+
+```jsonc
+{
+  "validation_id": "…", "normalization_id": "…", "attempt_number": 1,
+  "status": "PROCESSING | COMPLETED | FAILED",
+  "started_at": "…Z", "completed_at": "…Z" | null,
+  "created_at": "…Z", "updated_at": "…Z",
+  "failure_code": null, "failure_message": null,
+  "data": {
+    "findings": [
+      { "rule": "totals_do_not_reconcile", "severity": "warning",
+        "field_path": "total_amount", "expected": "119.00", "actual": "120.00",
+        "message": "…client-safe…", "context": { "tolerance": "0.01" } }
+    ],
+    "summary": { "total": 1, "error": 0, "warning": 1, "info": 0 }
+  }
+}
+```
+
+- `summary` is re-derived from `findings` on every read, never stored, so it
+  cannot drift. There is no `document_id`, no confidence, and no
+  acceptance/rejection/escalation field anywhere in the response.
+- The validation record references its source `normalization_id` and never
+  mutates it or any Stage 2–4 row. Schema changes go through Alembic
+  (`0004_validation_tables`).
+
+### Validation lifecycle
+
+`ValidationService` (`app/services/processing/validation/`) drives one
+attempt, mirroring Stage 4 exactly:
+
+```text
+COMPLETED normalization ─> PROCESSING ─> COMPLETED | FAILED
+FAILED validation        ─(retry)─> PROCESSING ─> COMPLETED | FAILED
+```
+
+- `PROCESSING` is committed **before** the deterministic rule engine runs. A
+  `SELECT ... FOR UPDATE` on the source normalization row plus a partial
+  unique index keep at most one active attempt per normalization; a lost race
+  becomes a `409`.
+- Only an infrastructure problem (source normalization unreadable, a database
+  write failure, an unexpected engine exception) makes an attempt `FAILED`,
+  and it rolls back with no partial result and a generic `VALIDATION_FAILED`
+  reason. History is preserved as `attempt_number` 1, 2, 3, …
+- Normalization and validation stay independently callable; validation never
+  changes the document, extraction, or normalization rows.
+
+### Processing pipeline
+
+`ProcessingPipeline` (`app/services/processing/pipeline.py`) composes the stages
+into `upload → extraction → normalization → validation`. It adds no processing
+rules — it runs the extraction stage, then, only when it ended `COMPLETED`, the
+normalization stage, then, only when *that* ended `COMPLETED`, the validation
+stage, against one session.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/documents/{document_id}/pipeline` | run extraction, then normalization, then validation (`201`) |
+| `POST` | `/documents/{document_id}/pipeline/retry` | retry a failed extraction, then normalize and validate the new attempt (`201`) |
+
+**Response** (`PipelineRunResult`) — the three per-stage public results side by
 side, no fields of its own:
 
 ```jsonc
 {
   "extraction":    { /* InvoiceExtractionResult */ },
-  "normalization": { /* InvoiceNormalizationResult */ } | null
+  "normalization": { /* InvoiceNormalizationResult */ } | null,
+  "validation":    { /* InvoiceValidationResult */ } | null
 }
 ```
 
@@ -359,14 +451,20 @@ side, no fields of its own:
   normalize) — retry the pipeline. When present it may itself be `FAILED` (a
   normalization technical failure that left the completed extraction intact) or
   `COMPLETED` with field-level errors in `normalization.data.errors`.
-- A run that *starts* is `201` even if a stage then fails; the stage's `status`
-  and `failure_code` say what happened. The extraction stage's own `404`
-  (`DOCUMENT_NOT_FOUND`) and `409` (`DOCUMENT_ALREADY_EXTRACTED`,
+- `validation` is `null` when `normalization` is absent or did not complete
+  (nothing to validate). When present it may itself be `FAILED` (a validation
+  technical failure that left the completed normalization intact) or
+  `COMPLETED` with findings in `validation.data.findings` — a finding is not a
+  failure and never implies acceptance, rejection, or `NEEDS_REVIEW`.
+- A run that *starts* is `201` even if a later stage then fails; the stage's
+  `status` and `failure_code` say what happened. The extraction stage's own
+  `404` (`DOCUMENT_NOT_FOUND`) and `409` (`DOCUMENT_ALREADY_EXTRACTED`,
   `EXTRACTION_NOT_FAILED`, …) propagate unchanged. Unknown body keys →
   `422 VALIDATION_ERROR`.
 - The per-stage endpoints (`/extractions[...]`,
-  `/extractions/{eid}/normalizations[...]`) are unchanged and remain the way to
-  drive or inspect one stage in isolation.
+  `/extractions/{eid}/normalizations[...]`, and
+  `/extractions/{eid}/normalizations/{nid}/validations[...]`) are unchanged and
+  remain the way to drive or inspect one stage in isolation.
 
 ## Tests
 
@@ -383,7 +481,7 @@ with `DATABASE_URL` but swaps in a dedicated `ledgerdrop_test` database, which i
 creates automatically and rebuilds for every test. Set `TEST_DATABASE_URL` to
 point at a different server. No services beyond PostgreSQL are required, and no
 test calls an external AI service — extraction runs on the deterministic fake
-provider and normalization makes no network call at all.
+provider, and normalization and validation make no network call at all.
 
 `tests/test_stage4_verification.py` is the Stage 4 acceptance checklist: every
 bullet (date formats, ambiguous/impossible dates, currency validity, separator
@@ -392,6 +490,22 @@ preservation, null/empty values, line items, structured errors, DB constraints,
 lifecycle/retry, concurrency, transaction rollback, retrieval + `404`/`409`,
 Stage 3 preservation, no-AI/no-network) maps to an assertion there, mostly
 exercised end to end through the engine + service + API + pipeline.
+
+`tests/test_stage5_verification.py` is the Stage 5 acceptance checklist the same
+way. Its docstring maps every bullet (every rule passing/failing at its
+tolerance edges, missing-required-field + normalization-error co-occurrence,
+date/reconciliation/confidence/duplicate/high-value behaviour, lifecycle,
+concurrency, transactional rollback, retrieval + `404`/`409`, DB relationships,
+no-AI/no-network) to the dense per-layer test file (`test_validation_rules.py`,
+`test_validation_engine.py`, `test_validation_service.py`,
+`test_validations_api.py`, …) that already covers it exhaustively, and adds
+only what had no automated coverage yet: golden clean / many-finding /
+duplicate invoices run end to end through the real API and pipeline, an
+API-level concurrent-start race, a full-chain byte-for-byte immutability check
+(every Stage 2–4 row and the stored PDF bytes, before vs. after a validation
+call), and an `alembic upgrade head → downgrade -1 → upgrade head → check`
+round trip against a dedicated throwaway database proving Stage 2–4 data
+survives byte-for-byte.
 
 ## Layout
 
@@ -408,15 +522,20 @@ app/
     document.py      the documents table
     extraction.py    invoice_extractions + invoice_line_items tables
     normalization.py invoice_normalizations + normalized line items + field errors
+    validation.py    invoice_validations + invoice_validation_findings tables
   schemas/
-    document.py      DocumentRead - public metadata (no file_location / file_hash)
+    document.py                  DocumentRead - public metadata (no file_location / file_hash)
     extraction.py                internal invoice extraction contract ({value, confidence})
     extraction_persistence.py    flat <-> nested mapping for the extraction tables
     extraction_api.py            extraction request + public response models
     normalization.py             internal normalized invoice contract (single value | null, no confidence)
     normalization_persistence.py nested <-> flat mapping for the normalization tables
     normalization_api.py         normalization request + public response models
-    pipeline_api.py              PipelineRunRequest + PipelineRunResult (both stage results)
+    validation.py                internal validation contract (findings + re-derived summary, no decision vocabulary)
+    validation_catalogue.py      closed RuleSpec catalogue - one entry per ValidationRule
+    validation_persistence.py    InvoiceValidation <-> flat finding-row mapping
+    validation_api.py            validation request + public response models
+    pipeline_api.py              PipelineRunRequest + PipelineRunResult (all three stage results)
   services/
     pdf.py           inspect_pdf: signature + readability + page-count check
     storage/
@@ -437,12 +556,20 @@ app/
         lifecycle.py      valid extraction / normalization-attempt transitions
         repository.py      NormalizationRepository - reads/writes the normalization tables
         service.py         NormalizationService - start / retry, PROCESSING -> COMPLETED|FAILED
-      pipeline.py       ProcessingPipeline - composes extraction -> normalization (no rules of its own)
+      validation/
+        policy.py         every provisional ⚠ Part 2 constant (Decimal), vendored - nowhere else
+        rules.py          one pure check_<rule>(RuleContext) per catalogue member + run_rules
+        engine.py          read-only evaluate(session, normalization_id, *, started_at) -> InvoiceValidation
+        lifecycle.py       valid normalization / validation-attempt transitions
+        repository.py      ValidationRepository - reads/writes the validation tables
+        service.py         ValidationService - start / retry, PROCESSING -> COMPLETED|FAILED
+      pipeline.py       ProcessingPipeline - composes extraction -> normalization -> validation (no rules of its own)
   api/
-    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_pipeline)
+    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_validation_service, get_pipeline)
     documents.py     POST /documents, GET /documents[/{id}[/file]]
     extractions.py   POST/GET /documents/{id}/extractions[...]
     normalizations.py POST/GET /documents/{id}/extractions/{eid}/normalizations[...]
+    validations.py   POST/GET /documents/{id}/extractions/{eid}/normalizations/{nid}/validations[...]
     pipeline.py      POST /documents/{id}/pipeline[/retry]
     health.py        health endpoints
     router.py        aggregate router

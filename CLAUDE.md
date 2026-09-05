@@ -108,9 +108,9 @@ contract, pinned policies, persistence layout, API, verification map — in
   network" is proven by a `socket`-blocked engine run and a source scan of the
   normalization package.
 
-**Stage 5 (deterministic invoice validation): steps 1–8 done, steps 9–14 NOT
-authorized.** Stage 5 will consume the exact completed Stage 4 normalization
-attempt, evaluate a closed catalogue of deterministic rules, and record
+**Stage 5 (deterministic invoice validation): all 14 steps done — Stage 5 is
+complete.** Stage 5 consumes the exact completed Stage 4 normalization
+attempt, evaluates a closed catalogue of deterministic rules, and records
 structured findings. It reports **facts only** — a rule violation completes
 validation with findings, not a technical failure — and never decides
 acceptance, rejection, or escalation or moves a document to `NEEDS_REVIEW` (that
@@ -164,9 +164,76 @@ pure `check_<rule>(RuleContext)->list[ValidationFinding]` per catalogue member
 (message + default severity from the catalogue), all arithmetic in an
 input-sized `Decimal` context so no contract-valid value rounds and no `float`
 appears, immutable `RULE_FUNCTIONS` +
-`run_rules` covering every rule in `position` order. Steps 9–14 (engine, service,
-API, pipeline, tests) are **not authorized** — do not start any of them until
-the user explicitly says so.
+`run_rules` covering every rule in `position` order. Step 9 (engine) is
+`backend/app/services/processing/validation/engine.py` (+
+`tests/test_validation_engine.py`): read-only `evaluate(session,
+normalization_id, *, started_at)` loads the attempt + its errors, reads the five
+`<critical_field>_confidence` columns from the source `invoice_extractions` row,
+builds the §2.5 candidate set (latest COMPLETED extraction → latest COMPLETED
+normalization per *other* document, applying `completed_at <= started_at` to
+both stages, no older-
+extraction fall-back), and returns
+`InvoiceValidation.from_findings(run_rules(ctx))` with `run_date = started_at`
+(UTC date); a test asserts it writes nothing. Step 10 (lifecycle) is
+`backend/app/services/processing/validation/lifecycle.py` (+
+`tests/test_validation_lifecycle.py`), mirroring Stage 4:
+`ensure_normalization_can_validate(...)` raises `ConflictError` (409) with
+`NORMALIZATION_NOT_COMPLETED` / `VALIDATION_IN_PROGRESS` /
+`NORMALIZATION_ALREADY_VALIDATED` / `VALIDATION_FAILED` /
+`VALIDATION_NOT_FAILED`; `ensure_attempt_transition` allows only
+`PROCESSING → COMPLETED | FAILED`. A rule violation is a finding on a `COMPLETED`
+attempt, never `FAILED`. Step 11 (service + repository) is
+`backend/app/schemas/validation_persistence.py` (the `InvoiceValidation` <->
+flat-row bridge, mirroring `normalization_persistence.py`; `expected`/`actual`
+stored as display strings) and
+`backend/app/services/processing/validation/{repository,service}.py` (+
+`tests/test_validation_{persistence,service}.py`): `ValidationRepository` is the
+sole reader/writer of the two tables; `ValidationService.start`/`retry` mirror
+`NormalizationService` exactly — `SELECT ... FOR UPDATE` on the source
+`invoice_normalizations` row, a `PROCESSING` attempt flushed and **committed
+before the engine runs**, findings persisted + marked `COMPLETED` in one
+transaction, any fault (engine or persistence) rolled back to a generic
+`VALIDATION_FAILED` with zero partial finding rows, history preserved, no
+Stage 2–4 row ever written to. Step 12 (API) is
+`backend/app/schemas/validation_api.py` (`ValidationStartRequest` +
+`InvoiceValidationResult` — status, timestamps, `failure_*`,
+`data: InvoiceValidation`, mirroring `normalization_api.py`) and
+`backend/app/api/validations.py` (+ `tests/test_validations_api.py`), wired
+into `deps.py` (`get_validation_service`) and `router.py`: `POST` / `POST
+…/retry` / `GET` / `GET …/latest` / `GET …/{vid}` under
+`/documents/{id}/extractions/{eid}/normalizations/{nid}/validations`; `404`
+`DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND` /
+`VALIDATION_NOT_FOUND`; `409` the step 10 lifecycle codes; an empty body is
+valid and an unknown body key is `422`; a technical failure is still `201`
+with `status = FAILED`. Step 13 (pipeline) is
+`backend/app/services/processing/pipeline.py` (+ `tests/test_pipeline.py`,
+`tests/test_pipeline_api.py`): `ProcessingPipeline.run` chains
+`extraction -> normalization -> validation` in one session, gaining a third
+stage — `_continue_to_validation` calls `ValidationService.start` only when
+normalization ended `COMPLETED`, mirroring `_continue_to_normalization`
+exactly, including swallowing an "attempt already exists" `ConflictError`
+(`VALIDATION_IN_PROGRESS` / `NORMALIZATION_ALREADY_VALIDATED` /
+`VALIDATION_FAILED`) by returning the latest existing attempt instead of
+forcing a second one, and re-loading every attempt after the run so a later
+stage's rollback never hands back an expired row. `PipelineResult` /
+`PipelineRunResult` (`backend/app/schemas/pipeline_api.py`) gain
+`validation: InvoiceValidationResult | null`, `null` exactly when
+`normalization` is absent or did not complete; no rule logic moved into the
+pipeline. Step 14 (verification tests and documentation) is
+`backend/tests/test_stage5_verification.py`, mirroring
+`test_stage4_verification.py`: a bullet-to-test map in the module docstring
+points every checklist item at its exhaustive coverage from steps 3–12 (the
+rule catalogue, deterministic rule functions, engine, persistence, lifecycle,
+and API test files), and the file itself adds only what had no automated
+coverage yet — golden clean/many-finding/duplicate invoices run end to end
+through the real API and pipeline, an API-level concurrent-start race, a
+full-chain byte-for-byte immutability check (`documents` /
+`invoice_extractions` / `invoice_normalizations*` rows and the stored PDF
+bytes, before vs. after a validation call), an `alembic upgrade head ->
+downgrade -1 -> upgrade head -> check` round trip against a dedicated
+throwaway database proving Stage 2–4 data survives byte-for-byte, and a
+schema-layer AI-SDK-import guard mirroring Stage 4's. README updated to
+match. Stage 5 is now fully implemented end to end.
 
 ## Technology decisions
 
@@ -193,7 +260,7 @@ Browser -> Next.js frontend -> FastAPI document API
    `-- Processing pipeline
        |-- Extraction             <- Stage 3 (done)
        |-- Normalization          <- Stage 4 (done)
-       |-- Validation             <- Stage 5 (planned, not authorized)
+       |-- Validation             <- Stage 5 (done)
        `-- Decision / escalation  <- later
 ```
 

@@ -29,6 +29,7 @@ from app.services.processing.extraction.preprocessing import (
 from app.services.processing.extraction.provider import ExtractionProvider, ProviderError
 from app.services.processing.normalization import NormalizationService
 from app.services.processing.pipeline import ProcessingPipeline
+from app.services.processing.validation import ValidationService
 from app.services.storage import LocalFileStorage
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "get_extractor",
     "get_prepared_result_producer",
     "get_normalization_service",
+    "get_validation_service",
     "get_pipeline",
 ]
 
@@ -67,10 +69,22 @@ def get_normalization_service(
     return NormalizationService(db)
 
 
+def get_validation_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ValidationService:
+    """Build a :class:`ValidationService` bound to the request's session.
+
+    Validation is fully deterministic and offline, so - like normalization -
+    there is no provider to inject.
+    """
+    return ValidationService(db)
+
+
 def get_pipeline(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ProcessingPipeline:
-    """Build the composed extraction+normalization pipeline for this request.
+    """Build the composed extraction+normalization+validation pipeline for this
+    request.
 
     It builds the same per-stage services a caller would use directly, bound to
     the request's session - the pipeline only composes them.

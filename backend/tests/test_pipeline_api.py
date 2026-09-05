@@ -1,10 +1,10 @@
-"""Tests for the composed pipeline endpoint (Stage 4, step 13).
+"""Tests for the composed pipeline endpoint (Stage 4 step 13; Stage 5 step 13).
 
 These drive the real HTTP layer through the ``client`` fixture. Extraction runs
 on the deterministic offline fake (forced regardless of the machine's
-``EXTRACTION_PROVIDER``); normalization has no provider. The per-stage
-endpoints are exercised alongside the pipeline to prove they stay usable on
-their own.
+``EXTRACTION_PROVIDER``); normalization and validation have no provider. The
+per-stage endpoints are exercised alongside the pipeline to prove they stay
+usable on their own.
 """
 
 from __future__ import annotations
@@ -19,7 +19,10 @@ from app.services.processing.extraction.fake import FakeBehavior, FakeExtraction
 
 from tests._helpers import make_pdf
 
-_ENGINE_PATH = "app.services.processing.normalization.service.normalize_extraction"
+_NORMALIZATION_ENGINE_PATH = (
+    "app.services.processing.normalization.service.normalize_extraction"
+)
+_VALIDATION_ENGINE_PATH = "app.services.processing.validation.service.evaluate"
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +52,7 @@ async def _upload(client: AsyncClient) -> str:
 # --- happy path ------------------------------------------------------
 
 
-async def test_run_pipeline_returns_both_stage_results(client: AsyncClient) -> None:
+async def test_run_pipeline_returns_all_three_stage_results(client: AsyncClient) -> None:
     document_id = await _upload(client)
 
     resp = await client.post(f"/documents/{document_id}/pipeline")
@@ -69,6 +72,19 @@ async def test_run_pipeline_returns_both_stage_results(client: AsyncClient) -> N
     assert "document_id" not in body["normalization"]
     assert "raw_response" not in resp.text
 
+    assert body["validation"] is not None
+    assert body["validation"]["status"] == "COMPLETED"
+    assert (
+        body["validation"]["normalization_id"] == body["normalization"]["normalization_id"]
+    )
+    assert body["validation"]["attempt_number"] == 1
+    assert body["validation"]["data"]["summary"]["total"] == len(
+        body["validation"]["data"]["findings"]
+    )
+    # validation view carries no decision vocabulary
+    assert "document_id" not in body["validation"]
+    assert "NEEDS_REVIEW" not in resp.text
+
     doc = (await client.get(f"/documents/{document_id}")).json()
     assert doc["status"] == "COMPLETED"
 
@@ -80,6 +96,7 @@ async def test_pipeline_result_matches_the_per_stage_endpoints(
     body = (await client.post(f"/documents/{document_id}/pipeline")).json()
     extraction_id = body["extraction"]["extraction_id"]
     normalization_id = body["normalization"]["normalization_id"]
+    validation_id = body["validation"]["validation_id"]
 
     latest_extraction = await client.get(
         f"/documents/{document_id}/extractions/latest"
@@ -92,6 +109,13 @@ async def test_pipeline_result_matches_the_per_stage_endpoints(
     )
     assert latest_norm.status_code == 200
     assert latest_norm.json()["normalization_id"] == normalization_id
+
+    latest_validation = await client.get(
+        f"/documents/{document_id}/extractions/{extraction_id}"
+        f"/normalizations/{normalization_id}/validations/latest"
+    )
+    assert latest_validation.status_code == 200
+    assert latest_validation.json()["validation_id"] == validation_id
 
 
 # --- extraction failure stops the chain ---------------------------
@@ -109,6 +133,7 @@ async def test_run_pipeline_stops_at_a_failed_extraction(
     body = resp.json()
     assert body["extraction"]["status"] == "FAILED"
     assert body["normalization"] is None
+    assert body["validation"] is None
 
 
 async def test_run_pipeline_reports_a_normalization_technical_failure(
@@ -119,7 +144,7 @@ async def test_run_pipeline_reports_a_normalization_technical_failure(
     def boom(_contract):
         raise RuntimeError("engine crash key=sk-super-secret")
 
-    monkeypatch.setattr(_ENGINE_PATH, boom)
+    monkeypatch.setattr(_NORMALIZATION_ENGINE_PATH, boom)
     resp = await client.post(f"/documents/{document_id}/pipeline")
 
     assert resp.status_code == 201, resp.text
@@ -127,6 +152,27 @@ async def test_run_pipeline_reports_a_normalization_technical_failure(
     assert body["extraction"]["status"] == "COMPLETED"
     assert body["normalization"]["status"] == "FAILED"
     assert body["normalization"]["failure_code"] == "NORMALIZATION_FAILED"
+    assert body["validation"] is None
+    assert "sk-super-secret" not in resp.text
+
+
+async def test_run_pipeline_reports_a_validation_technical_failure(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_id = await _upload(client)
+
+    async def boom(_session, _normalization_id, *, started_at):
+        raise RuntimeError("engine crash key=sk-super-secret")
+
+    monkeypatch.setattr(_VALIDATION_ENGINE_PATH, boom)
+    resp = await client.post(f"/documents/{document_id}/pipeline")
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["extraction"]["status"] == "COMPLETED"
+    assert body["normalization"]["status"] == "COMPLETED"
+    assert body["validation"]["status"] == "FAILED"
+    assert body["validation"]["failure_code"] == "VALIDATION_FAILED"
     assert "sk-super-secret" not in resp.text
 
 
@@ -162,7 +208,7 @@ async def test_run_pipeline_rejects_unknown_body_keys(client: AsyncClient) -> No
 # --- retry ---------------------------------------------------------
 
 
-async def test_retry_pipeline_after_a_failed_extraction_completes_both_stages(
+async def test_retry_pipeline_after_a_failed_extraction_completes_all_stages(
     client: AsyncClient, app
 ) -> None:
     _use_failing_extractor(app)
@@ -170,6 +216,7 @@ async def test_retry_pipeline_after_a_failed_extraction_completes_both_stages(
     failed = (await client.post(f"/documents/{document_id}/pipeline")).json()
     assert failed["extraction"]["status"] == "FAILED"
     assert failed["normalization"] is None
+    assert failed["validation"] is None
 
     _use_ok_extractor(app)
     resp = await client.post(f"/documents/{document_id}/pipeline/retry")
@@ -181,6 +228,10 @@ async def test_retry_pipeline_after_a_failed_extraction_completes_both_stages(
     assert body["normalization"]["status"] == "COMPLETED"
     assert (
         body["normalization"]["extraction_id"] == body["extraction"]["extraction_id"]
+    )
+    assert body["validation"]["status"] == "COMPLETED"
+    assert (
+        body["validation"]["normalization_id"] == body["normalization"]["normalization_id"]
     )
 
 
@@ -210,6 +261,14 @@ async def test_per_stage_endpoints_still_work_standalone(client: AsyncClient) ->
     )
     assert normalization.status_code == 201
     assert normalization.json()["status"] == "COMPLETED"
+    normalization_id = normalization.json()["normalization_id"]
+
+    validation = await client.post(
+        f"/documents/{document_id}/extractions/{extraction_id}"
+        f"/normalizations/{normalization_id}/validations"
+    )
+    assert validation.status_code == 201
+    assert validation.json()["status"] == "COMPLETED"
 
 
 async def test_stage_2_and_3_endpoints_unaffected(client: AsyncClient) -> None:

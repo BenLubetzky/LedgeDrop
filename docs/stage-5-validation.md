@@ -5,23 +5,33 @@ high-level summary and the guardrails; this file holds the boundary (step 1),
 the pinned validation policies (step 2), the validation contract and rule
 catalogue these imply, the implementation order, and the verification list.
 
-**Status.** Steps 1–8 are done: Parts 1–3 of this document (Part 2's §2.6 carries
-the step 5 missing-confidence decision), plus the internal validation contract in
-`backend/app/schemas/validation.py` (with
+**Status.** All 14 steps are done; Stage 5 is complete. Parts 1–3 of this
+document (Part 2's §2.6
+carries the step 5 missing-confidence decision), plus the internal validation
+contract in `backend/app/schemas/validation.py` (with
 `backend/tests/test_validation_contract.py`, which carries the §1.7 boundary
 tests), the formal rule catalogue in
 `backend/app/schemas/validation_catalogue.py` (with
 `backend/tests/test_validation_catalogue.py`), the persistence models in
 `backend/app/models/validation.py` (with `backend/tests/test_validation_model.py`),
 the migration `backend/alembic/versions/0004_validation_tables.py` (verified
-up / down / re-up with Stage 2–4 data preserved and `alembic check` clean), and
+up / down / re-up with Stage 2–4 data preserved and `alembic check` clean),
 the pinned policy + pure rule functions in
-`backend/app/services/processing/validation/{policy,rules}.py` (with
-`backend/tests/test_validation_{policy,rules}.py`). Step 5 added no code — it is a
-pinned policy and its confidence read is wired in step 9. Steps 9–14 are **not
-authorized** — do not start any of them, or write the engine / service / API
-code, until the user explicitly authorizes that step. Every ⚠ value now lives in
-`policy.py` (step 8) and nowhere else; the catalogue still embeds none.
+`backend/app/services/processing/validation/{policy,rules}.py`, the read-only
+engine `.../engine.py`, the lifecycle guards `.../lifecycle.py`, the
+`InvoiceValidation` <-> flat-row bridge in
+`backend/app/schemas/validation_persistence.py`, and the repository / service
+orchestration `.../{repository,service}.py` (with
+`backend/tests/test_validation_{policy,rules,engine,lifecycle,persistence,
+service}.py`), and the public API in `backend/app/api/validations.py` with
+`backend/app/schemas/validation_api.py` and
+`backend/tests/test_validations_api.py`, and the three-stage pipeline in
+`backend/app/services/processing/pipeline.py` with
+`backend/tests/test_pipeline.py` and `backend/tests/test_pipeline_api.py`. Step
+5 added no code — it is a pinned policy, and its confidence read is performed
+by the step 9 engine. Step 14's acceptance map is
+`backend/tests/test_stage5_verification.py`. Every ⚠ value lives in `policy.py`
+(step 8) and nowhere else; the catalogue embeds none.
 
 **Policy values marked ⚠ are judgement calls** made to unblock the design.
 They are deliberately conservative and self-documenting (every
@@ -269,12 +279,12 @@ fuzzy / edit-distance matching in the MVP (noted as a future extension).
 `COMPLETED` extraction of every document *other than* the one under validation
 (join `invoice_normalizations → invoice_extractions → documents`, exclude the
 current `document_id`; first choose the highest completed extraction
-`attempt_number` per document, then its highest completed normalization
-`attempt_number`, if one exists). Do not fall back to an older extraction when
-the latest one has no completed normalization. A candidate must have
-`normalization.completed_at <= validation.started_at`, so a normalization that
-finishes concurrently after validation started cannot leak into the run's
-as-of snapshot. See §2.8 on A/B asymmetry.
+`attempt_number` per document whose `completed_at <= validation.started_at`,
+then its highest completed normalization `attempt_number` with the same cutoff,
+if one exists). Do not fall back to an older extraction when the latest
+qualifying one has no completed normalization. These cutoffs prevent an
+extraction or normalization that finishes concurrently after validation
+started from leaking into the run's as-of snapshot. See §2.8 on A/B asymmetry.
 
 **Match key** — a candidate is a probable duplicate of the invoice under
 validation when **all** of these hold (both sides non-null and equal):
@@ -622,34 +632,81 @@ Introduce no AI or external-network call at any step.
    pass/fail and both sides of every ⚠ tolerance edge, determinism, contract
    validity of the output, a source scan and a `socket`-blocked run for "no
    network".
-9. **Build the validation engine.** Load the normalization attempt, its errors,
-   the confidence row, and the duplicate candidates; run every applicable rule;
-   assemble and re-validate the `InvoiceValidation`.
-10. **Implement lifecycle and retry behaviour.** `lifecycle.py` mirroring Stage
-    4: `ensure_normalization_can_validate` (source must be `COMPLETED`;
-    `NORMALIZATION_NOT_COMPLETED` / `VALIDATION_IN_PROGRESS` /
-    `NORMALIZATION_ALREADY_VALIDATED` / `VALIDATION_FAILED` /
-    `VALIDATION_NOT_FAILED`), and `ensure_attempt_transition`. Rule violations →
-    `COMPLETED` with findings; only technical faults → `FAILED`.
-11. **Add service and repository layers.** `ValidationRepository` (sole
-    reader/writer of the two tables) and `ValidationService.start` / `retry`:
-    lock the source normalization row, commit `PROCESSING` before the engine
-    runs, persist findings + mark `COMPLETED` in one transaction, roll back to a
-    generic `VALIDATION_FAILED` on any fault, preserve history, never touch a
-    Stage 2–4 row.
-12. **Add validation endpoints.** Under
+9. **Build the validation engine.** *(Done —
+   `app/services/processing/validation/engine.py` +
+   `tests/test_validation_engine.py`.)* `evaluate(session, normalization_id, *,
+   started_at)` loads the attempt with its line items and field errors
+   (`selectinload`), rebuilds the `NormalizedInvoice` via
+   `normalized_invoice_from_attempt`, reads the five
+   `<critical_field>_confidence` columns from the source `invoice_extractions`
+   row (`load_confidence` — no other extraction value), builds the §2.5
+   candidate set (`load_duplicate_candidates`: per *other* document, its highest
+   `COMPLETED` extraction `attempt_number` with `completed_at <= started_at`,
+   then that extraction's highest `COMPLETED` normalization with the same cutoff
+   — no fall-back to
+   an older extraction), then returns
+   `InvoiceValidation.from_findings(run_rules(ctx))` with `run_date` =
+   `started_at` as a UTC date (§2.8). Read-only: a test asserts row counts and
+   the source `updated_at` are unchanged and no `invoice_validations` row is
+   created. Persisting, the lifecycle, and retries are steps 10–11.
+10. **Implement lifecycle and retry behaviour.** *(Done —
+    `app/services/processing/validation/lifecycle.py` +
+    `tests/test_validation_lifecycle.py`.)* `lifecycle.py` mirrors Stage 4:
+    `ensure_normalization_can_validate(normalization_status,
+    latest_validation_status, *, action)` raises `ConflictError` (409) with
+    `NORMALIZATION_NOT_COMPLETED` (source not `COMPLETED`) /
+    `VALIDATION_IN_PROGRESS` (an attempt is `PROCESSING`) /
+    `NORMALIZATION_ALREADY_VALIDATED` (`start` over a `COMPLETED` attempt) /
+    `VALIDATION_FAILED` (`start` over a technical `FAILED` — retry instead) /
+    `VALIDATION_NOT_FAILED` (`retry` when the latest attempt is not `FAILED`,
+    or none exists); `ensure_attempt_transition` allows only
+    `PROCESSING → COMPLETED | FAILED` (both terminal), raising `ValueError` on
+    any other. A rule violation never fails the attempt — it is a finding on a
+    `COMPLETED` attempt; only a technical fault yields `FAILED`. The service
+    (step 11) applies these guards.
+11. **Add service and repository layers.** *(Done —
+    `app/schemas/validation_persistence.py`,
+    `app/services/processing/validation/{repository,service}.py` +
+    `tests/test_validation_{persistence,service}.py`.)*
+    `validation_persistence.py` bridges `InvoiceValidation` and the flat
+    finding-row layout, mirroring `normalization_persistence.py`:
+    `finding_rows` flattens with a zero-based `position` and stringifies
+    `expected`/`actual` (a `Decimal` becomes its display string — the
+    contract's `str | Decimal` serialises identically on the wire either way);
+    `invoice_validation_from_rows` rebuilds and re-validates. `ValidationRepository`
+    is the sole reader/writer of `invoice_validations` /
+    `invoice_validation_findings` (`get[_for_normalization]`,
+    `list/latest/active_for_normalization`, `next_attempt_number`, `add_attempt`,
+    `apply_result`) — it owns no transaction boundary. `ValidationService.start`
+    / `retry` (mirroring `NormalizationService` exactly): `SELECT ... FOR UPDATE`
+    locks the source `invoice_normalizations` row to serialise concurrent
+    starts (the partial unique index is the backstop, surfaced as a second
+    `IntegrityError` → `VALIDATION_IN_PROGRESS`); a `PROCESSING` attempt is
+    flushed and **committed before the engine runs**; the engine's result is
+    persisted and the attempt marked `COMPLETED` in one transaction; any
+    exception — from the engine or from persistence — rolls back and records a
+    generic `VALIDATION_FAILED` / `_GENERIC_FAILURE` on the already-committed
+    `PROCESSING` row, with **zero** partial finding rows; attempt history is
+    preserved (a retry is `attempt_number + 1`, earlier attempts untouched); no
+    Stage 2–4 row or the stored PDF is ever written to. Tests cover the happy
+    path, `404`/`409` gating (unknown id, source not `COMPLETED`, already
+    validated, active attempt, retry-without-a-failure), two concurrent starts
+    (exactly one wins), an engine exception, a forced persistence failure
+    (rolled back, zero finding rows), retry-after-failure (new attempt number,
+    old attempt untouched), and source-immutability.
+12. **Add validation endpoints.** *(Done.)* Under
     `/documents/{id}/extractions/{eid}/normalizations/{nid}/validations`:
     `POST` (start), `POST …/retry`, `GET` (history, newest first),
     `GET …/latest`, `GET …/{vid}`. Response `InvoiceValidationResult`
     (`status`, timestamps, `failure_*`, `data: InvoiceValidation`); empty body,
     `422` on unknown keys; `404` `…_NOT_FOUND`; `409` the §1.5 lifecycle codes;
     a technical failure is still `201` with `status = FAILED`.
-13. **Extend the processing pipeline.** `ProcessingPipeline.run` gains a third
+13. **Extend the processing pipeline.** *(Done.)* `ProcessingPipeline.run` gains a third
     stage: after a `COMPLETED` normalization, run validation; `PipelineRunResult`
     gains `validation: InvoiceValidationResult | null` (`null` when normalization
     did not complete). Each stage stays independently callable; no rule logic
     moves into the pipeline.
-14. **Add verification tests and documentation.** The list below, a
+14. **Add verification tests and documentation.** *(Done.)* The list below, a
     `test_stage5_verification.py` bullet-to-test map, and README + CLAUDE.md
     updates.
 
