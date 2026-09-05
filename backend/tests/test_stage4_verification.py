@@ -454,8 +454,13 @@ async def test_stage3_values_unchanged(client: AsyncClient, app) -> None:
     # the extraction record the pipeline returned and a fresh read are identical
     assert after.json() == piped["extraction"]
 
+    # Normalization itself never moves the document. The pipeline now also runs
+    # the Stage 6 decision: this invoice's date is unparseable, so Stage 5
+    # raises a gating ``normalization_error`` finding and the decision escalates
+    # it to NEEDS_REVIEW. The Stage 3 extraction record above is still
+    # byte-for-byte unchanged - the point of this test.
     doc = (await client.get(f"/documents/{document_id}")).json()
-    assert doc["status"] == "COMPLETED"   # normalization never moves the document
+    assert doc["status"] == "NEEDS_REVIEW"
 
 
 # --- lifecycle, retries, history --------------------

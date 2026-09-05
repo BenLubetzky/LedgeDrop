@@ -2,10 +2,13 @@
 
 FastAPI + async SQLAlchemy service. Stage 2 built the **upload foundation** (app
 skeleton, configuration, database layer, migrations, consistent API errors,
-local file storage); Stage 3 added **structured invoice extraction** and Stage 4
-added deterministic **normalization** of a completed extraction, wired together
-as `upload → extraction → normalization`. Validation and decision/escalation are
-not implemented yet.
+local file storage); Stage 3 added **structured invoice extraction**; Stage 4
+added deterministic **normalization** of a completed extraction; Stage 5 added
+deterministic **validation** of a completed normalization; Stage 6 added the
+deterministic **decision** over a completed validation — `ACCEPTED` or
+`NEEDS_REVIEW`, with ordered reasons — wired together as
+`upload → extraction → normalization → validation → decision`. Stages 2–6 are
+complete for English-language PDF invoices.
 
 ## Requirements
 
@@ -423,27 +426,138 @@ FAILED validation        ─(retry)─> PROCESSING ─> COMPLETED | FAILED
 - Normalization and validation stay independently callable; validation never
   changes the document, extraction, or normalization rows.
 
-### Processing pipeline
+## Decision API (Stage 6)
 
-`ProcessingPipeline` (`app/services/processing/pipeline.py`) composes the stages
-into `upload → extraction → normalization → validation`. It adds no processing
-rules — it runs the extraction stage, then, only when it ended `COMPLETED`, the
-normalization stage, then, only when *that* ended `COMPLETED`, the validation
-stage, against one session.
+Stage 6 turns a **completed** validation attempt into a business decision:
+`ACCEPTED` or `NEEDS_REVIEW`, plus the ordered `reasons` that explain it. Every
+reason maps 1:1 to one Stage 5 rule (reusing that rule's client-safe message)
+or to a caller's manual-review request — Stage 6 re-computes nothing, it only
+classifies Stage 5's own findings. It is deterministic and offline (no AI, no
+network) and it never auto-rejects or records a human's approval/rejection.
+Full spec in [`../docs/stage-6-decision.md`](../docs/stage-6-decision.md).
+
+Every path hangs off a Stage 5 validation attempt:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/documents/{document_id}/pipeline` | run extraction, then normalization, then validation (`201`) |
-| `POST` | `/documents/{document_id}/pipeline/retry` | retry a failed extraction, then normalize and validate the new attempt (`201`) |
+| `POST` | `/documents/{document_id}/extractions/{extraction_id}/normalizations/{normalization_id}/validations/{validation_id}/decisions` | start the first decision (`201`) |
+| `POST` | `.../validations/{validation_id}/decisions/retry` | run a new attempt after a technical failure (`201`) |
+| `GET`  | `.../validations/{validation_id}/decisions` | every attempt, newest first |
+| `GET`  | `.../validations/{validation_id}/decisions/latest` | the most recent attempt |
+| `GET`  | `.../validations/{validation_id}/decisions/{decision_id}` | one specific attempt |
 
-**Response** (`PipelineRunResult`) — the three per-stage public results side by
+- `404 DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND`
+  / `VALIDATION_NOT_FOUND` for an unknown or wrong-chain id;
+  `404 DECISION_NOT_FOUND` when the validation has no matching attempt.
+- `409` when the validation cannot legally be decided:
+  `VALIDATION_NOT_COMPLETED`, `DECISION_IN_PROGRESS`,
+  `VALIDATION_ALREADY_DECIDED` (a second `start` — a completed decision is
+  terminal), `DECISION_FAILED` (a `start` after a technical failure — use
+  `retry`), `DECISION_NOT_FAILED` (`retry` when the last attempt did not fail
+  technically), `STALE_VALIDATION_SOURCE` (the validation is no longer the
+  document's current chain — a defensive guard, not reachable through today's
+  API).
+- A decision that *runs* and hits a technical failure is still `201` — the
+  attempt was created; its `status` is `FAILED`, `data` is `null`, and
+  `failure_code` / `failure_message` (client-safe) say why. Use `retry`.
+- A `NEEDS_REVIEW` **outcome** is not a failure: the attempt is `COMPLETED`,
+  and it is the point at which the owning document moves to `NEEDS_REVIEW`. An
+  `ACCEPTED` outcome leaves the document `COMPLETED` (which has always meant
+  "extraction finished", not "accepted").
+
+**Request** (`DecisionStartRequest`) — start and retry take an optional body
+with one field, `manual_review_requested` (default `false`), which *adds* a
+`manual_review_requested` reason to the attempt (it can never force
+`ACCEPTED`). It is strict: `0`, `1`, `"false"`, `null` → `422`. Unknown keys →
+`422 VALIDATION_ERROR`. A `retry` builds a fresh attempt, so the flag must be
+supplied again to still apply.
+
+**Response** (`InvoiceDecisionResult`):
+
+```jsonc
+{
+  "decision_id": "…", "validation_id": "…", "attempt_number": 1,
+  "status": "PROCESSING | COMPLETED | FAILED",
+  "outcome": "ACCEPTED | NEEDS_REVIEW" | null,
+  "policy_version": "1",
+  "started_at": "…Z", "completed_at": "…Z" | null,
+  "created_at": "…Z", "updated_at": "…Z",
+  "failure_code": null, "failure_message": null,
+  "data": {
+    "outcome": "NEEDS_REVIEW",
+    "reasons": [
+      { "code": "totals_do_not_reconcile", "triggers_review": true,
+        "source_rule": "totals_do_not_reconcile", "field_path": null,
+        "message": "…client-safe, verbatim from the Stage 5 rule…" }
+    ]
+  } | null
+}
+```
+
+- `data` is the full `InvoiceDecision` contract **only on a `COMPLETED`
+  attempt**; it is `null` while `PROCESSING` and on a `FAILED` attempt (no
+  business outcome). `outcome` is also surfaced at the top level from the
+  stored column for list views; it agrees with `data.outcome` when `data` is
+  present.
+- `triggers_review` is stored per reason, not re-derived at read time, so a
+  historical decision still explains itself after the policy is retuned.
+  `policy_version` names the catalogue revision that produced the outcome.
+- The decision record references its source `validation_id` and never mutates
+  it or any Stage 2–5 row. The only write outside the decision tables is the
+  one authorized `documents.status → NEEDS_REVIEW` transition. Schema changes
+  go through Alembic (`0005_decision_tables`).
+
+### Decision lifecycle
+
+`DecisionService` (`app/services/processing/decision/`) drives one attempt,
+mirroring Stage 5 exactly and additionally locking and writing the owning
+`documents` row:
+
+```text
+COMPLETED validation ─> PROCESSING ─> COMPLETED (outcome: ACCEPTED | NEEDS_REVIEW)
+                                  └─> FAILED    (technical only, no outcome)
+FAILED decision       ─(retry)─> PROCESSING ─> COMPLETED | FAILED
+```
+
+- `PROCESSING` is committed **before** the pure engine runs. A
+  `SELECT ... FOR UPDATE` on the source validation row *and* the document row,
+  plus a partial unique index, keep at most one active attempt per validation;
+  a lost race becomes a `409`. `_complete` re-locks and re-checks the current
+  chain in the same transaction that writes the outcome and any `NEEDS_REVIEW`
+  status.
+- Only an infrastructure problem (source validation unreadable, a database
+  write failure, an unexpected engine exception) makes an attempt `FAILED`; it
+  rolls back with no partial reasons, a generic `DECISION_FAILED` reason, and
+  `documents.status` untouched. History is preserved as `attempt_number`
+  1, 2, 3, …
+- Validation and decision stay independently callable; a decision never
+  changes the validation, normalization, extraction, or stored PDF.
+
+### Processing pipeline
+
+`ProcessingPipeline` (`app/services/processing/pipeline.py`) composes the stages
+into `upload → extraction → normalization → validation → decision`. It adds no
+processing rules — it runs each stage against one session and only continues to
+the next when the previous one ended `COMPLETED`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/documents/{document_id}/pipeline` | run extraction, normalization, validation, then the decision (`201`) |
+| `POST` | `/documents/{document_id}/pipeline/retry` | retry a failed extraction, then normalize, validate, and decide the new attempt (`201`) |
+
+**Request** (`PipelineRunRequest`) — an optional body with one field,
+`manual_review_requested` (default `false`, strict), forwarded to the decision
+stage and ignored if the chain stops earlier. Unknown keys → `422`.
+
+**Response** (`PipelineRunResult`) — the four per-stage public results side by
 side, no fields of its own:
 
 ```jsonc
 {
   "extraction":    { /* InvoiceExtractionResult */ },
   "normalization": { /* InvoiceNormalizationResult */ } | null,
-  "validation":    { /* InvoiceValidationResult */ } | null
+  "validation":    { /* InvoiceValidationResult */ } | null,
+  "decision":      { /* InvoiceDecisionResult */ } | null
 }
 ```
 
@@ -455,16 +569,22 @@ side, no fields of its own:
   (nothing to validate). When present it may itself be `FAILED` (a validation
   technical failure that left the completed normalization intact) or
   `COMPLETED` with findings in `validation.data.findings` — a finding is not a
-  failure and never implies acceptance, rejection, or `NEEDS_REVIEW`.
+  failure.
+- `decision` is `null` when `validation` is absent or did not complete
+  (nothing to decide). When present it may itself be `FAILED` (a decision
+  technical failure that left the completed validation intact) or `COMPLETED`;
+  a `COMPLETED` decision whose `outcome` is `NEEDS_REVIEW` is not a failure —
+  it is where the document moved to `NEEDS_REVIEW`.
 - A run that *starts* is `201` even if a later stage then fails; the stage's
   `status` and `failure_code` say what happened. The extraction stage's own
   `404` (`DOCUMENT_NOT_FOUND`) and `409` (`DOCUMENT_ALREADY_EXTRACTED`,
   `EXTRACTION_NOT_FAILED`, …) propagate unchanged. Unknown body keys →
   `422 VALIDATION_ERROR`.
 - The per-stage endpoints (`/extractions[...]`,
-  `/extractions/{eid}/normalizations[...]`, and
-  `/extractions/{eid}/normalizations/{nid}/validations[...]`) are unchanged and
-  remain the way to drive or inspect one stage in isolation.
+  `/extractions/{eid}/normalizations[...]`,
+  `/extractions/{eid}/normalizations/{nid}/validations[...]`, and
+  `.../validations/{vid}/decisions[...]`) are unchanged and remain the way to
+  drive or inspect one stage in isolation.
 
 ## Tests
 
@@ -481,7 +601,8 @@ with `DATABASE_URL` but swaps in a dedicated `ledgerdrop_test` database, which i
 creates automatically and rebuilds for every test. Set `TEST_DATABASE_URL` to
 point at a different server. No services beyond PostgreSQL are required, and no
 test calls an external AI service — extraction runs on the deterministic fake
-provider, and normalization and validation make no network call at all.
+provider, and normalization, validation, and the decision make no network call
+at all.
 
 `tests/test_stage4_verification.py` is the Stage 4 acceptance checklist: every
 bullet (date formats, ambiguous/impossible dates, currency validity, separator
@@ -507,6 +628,19 @@ call), and an `alembic upgrade head → downgrade -1 → upgrade head → check`
 round trip against a dedicated throwaway database proving Stage 2–4 data
 survives byte-for-byte.
 
+`tests/test_stage6_verification.py` is the Stage 6 acceptance checklist the same
+way (its docstring carries the full bullet → coverage map, also reproduced in
+[`../docs/stage-6-decision.md`](../docs/stage-6-decision.md) "## Verification").
+It drives clean acceptance, every review trigger (including the
+`high_value_invoice` elevation above Stage 5's `info` severity), the
+all-`null`-confidence GPT-5-mini shape still accepting, manual-review requests,
+upstream/technical failures, retries, an API-level concurrent-start race, and
+the stale-source guard end to end; and adds what had no coverage: the
+`0005_decision_tables` migration round trip, a byte-for-byte check that a
+decision run leaves every Stage 2–5 row and the stored PDF untouched and
+changes only `documents.status` (and only to `NEEDS_REVIEW`), and the
+decision-subsystem no-AI/no-network guards.
+
 ## Layout
 
 ```text
@@ -523,6 +657,7 @@ app/
     extraction.py    invoice_extractions + invoice_line_items tables
     normalization.py invoice_normalizations + normalized line items + field errors
     validation.py    invoice_validations + invoice_validation_findings tables
+    decision.py      invoice_decisions + invoice_decision_reasons tables
   schemas/
     document.py                  DocumentRead - public metadata (no file_location / file_hash)
     extraction.py                internal invoice extraction contract ({value, confidence})
@@ -535,7 +670,11 @@ app/
     validation_catalogue.py      closed RuleSpec catalogue - one entry per ValidationRule
     validation_persistence.py    InvoiceValidation <-> flat finding-row mapping
     validation_api.py            validation request + public response models
-    pipeline_api.py              PipelineRunRequest + PipelineRunResult (all three stage results)
+    decision.py                  internal decision contract (outcome + ordered reasons)
+    decision_catalogue.py        closed ReasonPolicy table - one entry per rule + manual review
+    decision_persistence.py      InvoiceDecision <-> flat reason-row mapping
+    decision_api.py              decision request + public response models
+    pipeline_api.py              PipelineRunRequest + PipelineRunResult (all four stage results)
   services/
     pdf.py           inspect_pdf: signature + readability + page-count check
     storage/
@@ -563,13 +702,19 @@ app/
         lifecycle.py       valid normalization / validation-attempt transitions
         repository.py      ValidationRepository - reads/writes the validation tables
         service.py         ValidationService - start / retry, PROCESSING -> COMPLETED|FAILED
-      pipeline.py       ProcessingPipeline - composes extraction -> normalization -> validation (no rules of its own)
+      decision/
+        engine.py          pure decide(validation, *, manual_review_requested) -> InvoiceDecision
+        lifecycle.py       valid validation / decision-attempt transitions + document-status map
+        repository.py      DecisionRepository - reads/writes the decision tables
+        service.py         DecisionService - start / retry, PROCESSING -> COMPLETED|FAILED, writes documents.status
+      pipeline.py       ProcessingPipeline - composes extraction -> normalization -> validation -> decision (no rules of its own)
   api/
-    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_validation_service, get_pipeline)
+    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_validation_service, get_decision_service, get_pipeline)
     documents.py     POST /documents, GET /documents[/{id}[/file]]
     extractions.py   POST/GET /documents/{id}/extractions[...]
     normalizations.py POST/GET /documents/{id}/extractions/{eid}/normalizations[...]
     validations.py   POST/GET /documents/{id}/extractions/{eid}/normalizations/{nid}/validations[...]
+    decisions.py     POST/GET /documents/{id}/extractions/{eid}/normalizations/{nid}/validations/{vid}/decisions[...]
     pipeline.py      POST /documents/{id}/pipeline[/retry]
     health.py        health endpoints
     router.py        aggregate router

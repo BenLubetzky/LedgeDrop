@@ -1,8 +1,9 @@
-"""Processing-pipeline composition (Stage 4 step 13; Stage 5 step 13).
+"""Processing-pipeline composition (Stage 4 step 13; Stage 5 step 13;
+Stage 6 package 5).
 
 Chains the processing stages into one path::
 
-    upload -> extraction -> normalization -> validation
+    upload -> extraction -> normalization -> validation -> decision
 
 Each stage stays a fully independent subsystem - its own service, lifecycle,
 transaction boundary, repository, and API endpoints. This module only
@@ -12,17 +13,24 @@ polling between stages; it adds no processing rules of its own.
 Rules:
 
 * Normalization runs only when the extraction ended ``COMPLETED``. A failed
-  extraction stops the chain (``normalization`` and ``validation`` are
-  ``None``); retry it.
+  extraction stops the chain (``normalization``, ``validation`` and
+  ``decision`` are ``None``); retry it.
 * A normalization *technical* failure does not undo the completed extraction -
   it is recorded as a ``FAILED`` normalization attempt and can be retried on
   the normalization endpoint. A field-level normalization error is not a
   failure at all; the normalization attempt is ``COMPLETED`` and the error is
   carried in its ``errors``.
 * Validation runs only when the normalization ended ``COMPLETED``. A failed or
-  skipped normalization stops the chain (``validation`` is ``None``); no Stage
-  5 rule logic lives here - a rule violation is a finding on a ``COMPLETED``
-  validation attempt, not a pipeline decision.
+  skipped normalization stops the chain (``validation`` and ``decision`` are
+  ``None``); no Stage 5 rule logic lives here - a rule violation is a finding
+  on a ``COMPLETED`` validation attempt, not a pipeline decision.
+* Decision runs only when the validation ended ``COMPLETED`` (spec §2.5); a
+  failed or skipped validation stops the chain (``decision`` is ``None``). A
+  ``NEEDS_REVIEW`` outcome is a normal ``COMPLETED`` decision attempt - it is
+  the point at which the owning document moves to ``NEEDS_REVIEW``. Only a
+  decision *technical* failure leaves ``decision.status == "FAILED"``, retried
+  on the decision endpoint. No decision policy lives here; it stays in the
+  decision subsystem.
 """
 
 from __future__ import annotations
@@ -35,9 +43,12 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError
+from app.models.decision import DecisionAttempt
 from app.models.extraction import ExtractionAttempt, ExtractionStatus
 from app.models.normalization import NormalizationAttempt, NormalizationStatus
-from app.models.validation import ValidationAttempt
+from app.models.validation import ValidationAttempt, ValidationStatus
+from app.services.processing.decision import DecisionService
+from app.services.processing.decision.repository import DecisionRepository
 from app.services.processing.extraction import ExtractionService, ResultProducer
 from app.services.processing.extraction.repository import ExtractionRepository
 from app.services.processing.normalization import NormalizationService
@@ -56,16 +67,19 @@ class PipelineResult:
     ``normalization`` is ``None`` only when the extraction did not complete, so
     there was nothing to normalize. ``validation`` is ``None`` only when
     ``normalization`` is absent or did not complete, so there was nothing to
-    validate.
+    validate. ``decision`` is ``None`` only when ``validation`` is absent or
+    did not complete, so there was nothing to decide.
     """
 
     extraction: ExtractionAttempt
     normalization: NormalizationAttempt | None
     validation: ValidationAttempt | None
+    decision: DecisionAttempt | None
 
 
 class ProcessingPipeline:
-    """Runs extraction, then normalization, then validation against one session.
+    """Runs extraction, normalization, validation, then decision against one
+    session.
 
     The individual services are injectable for testing but default to plain
     instances bound to the same session, exactly as a caller would build them
@@ -79,11 +93,13 @@ class ProcessingPipeline:
         extraction: ExtractionService | None = None,
         normalization: NormalizationService | None = None,
         validation: ValidationService | None = None,
+        decision: DecisionService | None = None,
     ) -> None:
         self._session = session
         self._extraction = extraction or ExtractionService(session)
         self._normalization = normalization or NormalizationService(session)
         self._validation = validation or ValidationService(session)
+        self._decision = decision or DecisionService(session)
 
     async def run(
         self,
@@ -93,10 +109,13 @@ class ProcessingPipeline:
         produce: ResultProducer,
         provider_name: str,
         provider_model: str | None = None,
+        manual_review_requested: bool = False,
     ) -> PipelineResult:
         """Run extraction (``start`` or ``retry``), then continue to
-        normalization, then validation.
+        normalization, validation, and the business decision.
 
+        ``manual_review_requested`` is passed straight to the decision stage
+        (spec §2.4); it is ignored when the chain stops before a decision runs.
         Any ``NotFoundError`` / ``ConflictError`` from the extraction stage
         propagates unchanged - the pipeline does not mask a stage's own
         lifecycle errors.
@@ -123,6 +142,11 @@ class ProcessingPipeline:
         validation = await self._continue_to_validation(normalization)
         validation_id = None if validation is None else validation.validation_id
 
+        decision = await self._continue_to_decision(
+            validation, manual_review_requested=manual_review_requested
+        )
+        decision_id = None if decision is None else decision.decision_id
+
         # Each later stage owns its own transaction and, on a technical
         # failure, rolls the shared session back - which expires objects
         # loaded earlier in it. Re-load every attempt so the caller always
@@ -140,8 +164,15 @@ class ProcessingPipeline:
                 await ValidationRepository(self._session).get(validation_id)
                 or validation
             )
+        if decision_id is not None:
+            decision = (
+                await DecisionRepository(self._session).get(decision_id) or decision
+            )
         return PipelineResult(
-            extraction=extraction, normalization=normalization, validation=validation
+            extraction=extraction,
+            normalization=normalization,
+            validation=validation,
+            decision=decision,
         )
 
     async def _continue_to_normalization(
@@ -203,6 +234,44 @@ class ProcessingPipeline:
             )
             return await ValidationRepository(self._session).latest_for_normalization(
                 normalization.normalization_id
+            )
+
+    async def _continue_to_decision(
+        self,
+        validation: ValidationAttempt | None,
+        *,
+        manual_review_requested: bool = False,
+    ) -> DecisionAttempt | None:
+        """Decide a just-completed validation; skip a missing or failed one."""
+        if (
+            validation is None
+            or validation.status is not ValidationStatus.COMPLETED
+        ):
+            return None
+
+        try:
+            return await self._decision.start(
+                validation.validation_id,
+                manual_review_requested=manual_review_requested,
+            )
+        except ConflictError as exc:
+            # A decision attempt already exists for this validation (for
+            # example one started directly on the decision endpoint). The
+            # pipeline does not force a second one - it hands back the newest so
+            # the caller still gets a coherent result.
+            if exc.code not in {
+                "DECISION_IN_PROGRESS",
+                "VALIDATION_ALREADY_DECIDED",
+                "DECISION_FAILED",
+            }:
+                raise
+            logger.info(
+                "pipeline: decision already present for validation %s; "
+                "returning the latest attempt",
+                validation.validation_id,
+            )
+            return await DecisionRepository(self._session).latest_for_validation(
+                validation.validation_id
             )
 
 

@@ -74,6 +74,7 @@ __all__ = [
     "ValidatedInvoiceResult",
     "VALIDATION_RULE_CODES",
     "VALIDATION_FINDING_FIELD_NAMES",
+    "require_stage4_field_path",
 ]
 
 
@@ -140,13 +141,17 @@ _SCALAR_FIELDS: frozenset[str] = frozenset(NORMALIZED_SCALAR_FIELD_NAMES)
 _LINE_ITEM_FIELDS: frozenset[str] = frozenset(NORMALIZED_LINE_ITEM_FIELD_NAMES)
 
 
-def _require_field_path(path: str | None) -> str | None:
+def require_stage4_field_path(path: str | None) -> str | None:
     """Accept ``None`` or a Stage 4 field path; reject anything else.
 
     A valid non-null path is either one of the ten canonical scalar names or
     ``line_items.<index>.<field>`` with a zero-based index (no leading zeros)
     and a known line-item field. The index bound cannot be checked here - a
     single finding does not carry the line-item count - only the shape.
+
+    Public so later stages that anchor their own output to a Stage 4 field
+    (Stage 6 decision reasons) reuse this exact shape check instead of
+    re-implementing it.
     """
     if path is None:
         return None
@@ -238,7 +243,7 @@ class ValidationFinding(BaseModel):
     @field_validator("field_path")
     @classmethod
     def _check_field_path(cls, value: str | None) -> str | None:
-        return _require_field_path(value)
+        return require_stage4_field_path(value)
 
     @field_validator("expected", "actual", mode="before")
     @classmethod

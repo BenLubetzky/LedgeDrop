@@ -4,11 +4,15 @@ Business document-processing application. Users upload business documents; the
 system extracts, normalizes, and validates structured data, then accepts the
 result or routes it for human review.
 
-**Current stage: Stage 2 - the upload foundation.** The first use case is
-English-language PDF invoices. The backend upload API is complete; the frontend
-is scaffolded. Invoice extraction and later processing stages are not implemented
-yet. See [CLAUDE.md](CLAUDE.md) for the full scope and
-[docs/processing-spec.md](docs/processing-spec.md) for the deferred processing design.
+**Current stage: Stage 6 (decision and escalation) is complete.** Upload,
+structured invoice extraction, deterministic normalization, deterministic
+validation, and the deterministic decision (Stages 2-6) are complete for
+English-language PDF invoices. Stage 6 turns a completed validation into an
+`ACCEPTED` / `NEEDS_REVIEW` decision with ordered reasons, exposed through its
+own routes and as the fourth stage of the composed pipeline, and moves a
+document to `NEEDS_REVIEW` on that outcome. See [CLAUDE.md](CLAUDE.md) for the
+full scope; the backend-only remaining work is the human-review workflow and
+any read-only frontend, both separately scoped.
 
 ## Repository layout
 

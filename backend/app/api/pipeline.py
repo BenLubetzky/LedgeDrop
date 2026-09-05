@@ -1,17 +1,19 @@
-"""Composed processing-pipeline routes (Stage 4 step 13; Stage 5 step 13).
+"""Composed processing-pipeline routes (Stage 4 step 13; Stage 5 step 13;
+Stage 6 package 5).
 
 The pipeline chains the stages that already have their own endpoints:
 
 * ``POST /documents/{id}/pipeline``        run extraction, then normalization,
-  then validation
+  then validation, then the business decision
 * ``POST /documents/{id}/pipeline/retry``  retry a failed extraction, then
-  normalize and validate the new attempt
+  normalize, validate, and decide the new attempt
 
 The per-stage endpoints (``/extractions[...]``,
-``/extractions/{eid}/normalizations[...]``, and
-``/extractions/{eid}/normalizations/{nid}/validations[...]``) are unchanged and
-remain the way to drive or inspect a single stage in isolation. This route only
-saves a caller the round trip between them.
+``/extractions/{eid}/normalizations[...]``,
+``/extractions/{eid}/normalizations/{nid}/validations[...]``, and
+``.../validations/{vid}/decisions[...]``) are unchanged and remain the way to
+drive or inspect a single stage in isolation. This route only saves a caller
+the round trip between them.
 
 Status and error semantics come straight from the stages:
 
@@ -20,12 +22,15 @@ Status and error semantics come straight from the stages:
   ``DOCUMENT_ALREADY_EXTRACTED``, ``EXTRACTION_NOT_FAILED``,
   ``DOCUMENT_NOT_EXTRACTABLE``).
 * A run that *starts* is ``201`` even if a later stage then fails: the
-  extraction, normalization, or validation attempt was created and its
-  ``status`` / ``failure_code`` say what happened. ``normalization`` is
+  extraction, normalization, validation, or decision attempt was created and
+  its ``status`` / ``failure_code`` say what happened. ``normalization`` is
   ``null`` when the extraction did not complete; ``validation`` is ``null``
-  when the normalization is absent or did not complete.
+  when the normalization is absent or did not complete; ``decision`` is
+  ``null`` when the validation is absent or did not complete.
 
-No decision or escalation logic runs here - validation only records findings.
+``manual_review_requested`` in the body is forwarded to the decision stage
+(spec §2.4). No decision *policy* runs here - it stays in the decision
+subsystem; the pipeline only composes the call.
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ async def _run(
     action: str,
     produce: ResultProducer,
     provider: ExtractionProvider,
+    manual_review_requested: bool = False,
 ) -> PipelineRunResult:
     result = await pipeline.run(
         document_id,
@@ -58,9 +64,10 @@ async def _run(
         produce=produce,
         provider_name=provider.name,
         provider_model=getattr(provider, "model", None),
+        manual_review_requested=manual_review_requested,
     )
     return PipelineRunResult.from_attempts(
-        result.extraction, result.normalization, result.validation
+        result.extraction, result.normalization, result.validation, result.decision
     )
 
 
@@ -78,7 +85,14 @@ async def run_pipeline(
     body: PipelineRunRequest | None = None,
 ) -> PipelineRunResult:
     return await _run(
-        pipeline, document_id, action="start", produce=produce, provider=provider
+        pipeline,
+        document_id,
+        action="start",
+        produce=produce,
+        provider=provider,
+        manual_review_requested=(
+            body.manual_review_requested if body is not None else False
+        ),
     )
 
 
@@ -96,5 +110,12 @@ async def retry_pipeline(
     body: PipelineRunRequest | None = None,
 ) -> PipelineRunResult:
     return await _run(
-        pipeline, document_id, action="retry", produce=produce, provider=provider
+        pipeline,
+        document_id,
+        action="retry",
+        produce=produce,
+        provider=provider,
+        manual_review_requested=(
+            body.manual_review_requested if body is not None else False
+        ),
     )

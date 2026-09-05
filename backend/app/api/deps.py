@@ -27,6 +27,7 @@ from app.services.processing.extraction.preprocessing import (
     prepare_document,
 )
 from app.services.processing.extraction.provider import ExtractionProvider, ProviderError
+from app.services.processing.decision import DecisionService
 from app.services.processing.normalization import NormalizationService
 from app.services.processing.pipeline import ProcessingPipeline
 from app.services.processing.validation import ValidationService
@@ -40,6 +41,7 @@ __all__ = [
     "get_prepared_result_producer",
     "get_normalization_service",
     "get_validation_service",
+    "get_decision_service",
     "get_pipeline",
 ]
 
@@ -78,6 +80,19 @@ def get_validation_service(
     there is no provider to inject.
     """
     return ValidationService(db)
+
+
+def get_decision_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> DecisionService:
+    """Build a :class:`DecisionService` bound to the request's session.
+
+    Deciding is fully deterministic and offline - like normalization and
+    validation, there is no provider to inject. The service reads the source
+    Stage 5 validation and writes only its own decision rows plus the one
+    authorized ``documents.status`` transition to ``NEEDS_REVIEW``.
+    """
+    return DecisionService(db)
 
 
 def get_pipeline(

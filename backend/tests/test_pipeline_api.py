@@ -52,7 +52,7 @@ async def _upload(client: AsyncClient) -> str:
 # --- happy path ------------------------------------------------------
 
 
-async def test_run_pipeline_returns_all_three_stage_results(client: AsyncClient) -> None:
+async def test_run_pipeline_returns_all_four_stage_results(client: AsyncClient) -> None:
     document_id = await _upload(client)
 
     resp = await client.post(f"/documents/{document_id}/pipeline")
@@ -81,9 +81,18 @@ async def test_run_pipeline_returns_all_three_stage_results(client: AsyncClient)
     assert body["validation"]["data"]["summary"]["total"] == len(
         body["validation"]["data"]["findings"]
     )
-    # validation view carries no decision vocabulary
+    # validation view itself carries no decision vocabulary
     assert "document_id" not in body["validation"]
-    assert "NEEDS_REVIEW" not in resp.text
+    assert "NEEDS_REVIEW" not in str(body["validation"])
+
+    # the decision stage runs on the completed validation - the deterministic
+    # fake invoice is clean, so it is ACCEPTED and the document stays COMPLETED
+    assert body["decision"] is not None
+    assert body["decision"]["status"] == "COMPLETED"
+    assert body["decision"]["outcome"] == "ACCEPTED"
+    assert body["decision"]["validation_id"] == body["validation"]["validation_id"]
+    assert body["decision"]["data"]["reasons"] == []
+    assert "document_id" not in body["decision"]
 
     doc = (await client.get(f"/documents/{document_id}")).json()
     assert doc["status"] == "COMPLETED"
@@ -97,6 +106,7 @@ async def test_pipeline_result_matches_the_per_stage_endpoints(
     extraction_id = body["extraction"]["extraction_id"]
     normalization_id = body["normalization"]["normalization_id"]
     validation_id = body["validation"]["validation_id"]
+    decision_id = body["decision"]["decision_id"]
 
     latest_extraction = await client.get(
         f"/documents/{document_id}/extractions/latest"
@@ -117,6 +127,46 @@ async def test_pipeline_result_matches_the_per_stage_endpoints(
     assert latest_validation.status_code == 200
     assert latest_validation.json()["validation_id"] == validation_id
 
+    latest_decision = await client.get(
+        f"/documents/{document_id}/extractions/{extraction_id}"
+        f"/normalizations/{normalization_id}/validations/{validation_id}/decisions/latest"
+    )
+    assert latest_decision.status_code == 200
+    assert latest_decision.json()["decision_id"] == decision_id
+
+
+async def test_run_pipeline_forwards_manual_review_and_moves_the_document(
+    client: AsyncClient,
+) -> None:
+    document_id = await _upload(client)
+
+    resp = await client.post(
+        f"/documents/{document_id}/pipeline",
+        json={"manual_review_requested": True},
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["validation"]["status"] == "COMPLETED"
+    assert body["decision"]["status"] == "COMPLETED"
+    assert body["decision"]["outcome"] == "NEEDS_REVIEW"
+    assert body["decision"]["data"]["reasons"][-1]["code"] == "manual_review_requested"
+
+    doc = (await client.get(f"/documents/{document_id}")).json()
+    assert doc["status"] == "NEEDS_REVIEW"
+
+
+async def test_run_pipeline_rejects_a_non_bool_manual_review_flag(
+    client: AsyncClient,
+) -> None:
+    document_id = await _upload(client)
+    resp = await client.post(
+        f"/documents/{document_id}/pipeline",
+        json={"manual_review_requested": "yes"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
 
 # --- extraction failure stops the chain ---------------------------
 
@@ -134,6 +184,7 @@ async def test_run_pipeline_stops_at_a_failed_extraction(
     assert body["extraction"]["status"] == "FAILED"
     assert body["normalization"] is None
     assert body["validation"] is None
+    assert body["decision"] is None
 
 
 async def test_run_pipeline_reports_a_normalization_technical_failure(
@@ -153,6 +204,7 @@ async def test_run_pipeline_reports_a_normalization_technical_failure(
     assert body["normalization"]["status"] == "FAILED"
     assert body["normalization"]["failure_code"] == "NORMALIZATION_FAILED"
     assert body["validation"] is None
+    assert body["decision"] is None
     assert "sk-super-secret" not in resp.text
 
 
@@ -173,6 +225,7 @@ async def test_run_pipeline_reports_a_validation_technical_failure(
     assert body["normalization"]["status"] == "COMPLETED"
     assert body["validation"]["status"] == "FAILED"
     assert body["validation"]["failure_code"] == "VALIDATION_FAILED"
+    assert body["decision"] is None
     assert "sk-super-secret" not in resp.text
 
 

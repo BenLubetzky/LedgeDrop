@@ -23,217 +23,166 @@ frontend with drag/drop upload, client-side checks, progress feedback, and a
 document list. Accepted documents stay `UPLOADED` until processing runs.
 
 **Stage 3 (structured invoice extraction): complete.** Converts a stored PDF
-into schema-constrained invoice data with per-field confidence when the provider
-supplies it. Full spec in `docs/stage-3-extraction.md`; provider rationale in
-`docs/provider-selection.md`. Key code:
-
-- Contract: `backend/app/schemas/extraction.py`
-- Persistence: `backend/app/models/extraction.py`; migration
-  `0002_invoice_extraction_tables`
-- Schemas: `backend/app/schemas/extraction_persistence.py`, `extraction_api.py`
-- Service/lifecycle: `backend/app/services/processing/extraction/`
-  (`lifecycle.py`, `repository.py`, `service.py`); drives
-  `UPLOADED|FAILED -> PROCESSING -> COMPLETED|FAILED`
-- API: `backend/app/api/extractions.py` (`POST`/`GET` under
-  `/documents/{id}/extractions[...]`)
-- Preprocessing: `backend/app/services/processing/extraction/preprocessing.py`
-- Provider boundary: `provider.py` (`ExtractionProvider` + `ProviderError`
-  hierarchy); offline `FakeExtractionProvider` in `fake.py`; real adapter
-  `OpenAIExtractionProvider` in `openai_provider.py` (OpenAI GPT-5-mini).
-  `EXTRACTION_PROVIDER=openai|fake` selects it in `app/api/deps.py` (`fake` by
-  default). GPT-5-mini supplies no calibrated per-field confidence, so
-  application confidence is `null` for every field.
-- Evaluation: `backend/evaluation/` (`expected.json`, `generate_invoices.py`,
-  `dataset.py`, `scoring.py`)
+into schema-constrained invoice data with per-field confidence when the
+provider supplies it. Full spec, implementation order, and code inventory:
+`docs/stage-3-extraction.md`; provider rationale: `docs/provider-selection.md`.
+Code lives under `backend/app/services/processing/extraction/`,
+`backend/app/schemas/extraction*.py`, `backend/app/models/extraction.py`,
+`backend/app/api/extractions.py`. The provider stays behind
+`ExtractionProvider`; `FakeExtractionProvider` is the deterministic offline
+default, `OpenAIExtractionProvider` (GPT-5-mini) is the real adapter behind
+`EXTRACTION_PROVIDER=openai|fake`. GPT-5-mini supplies no calibrated per-field
+confidence, so application confidence is `null` for every field.
 
 **Stage 4 (normalization): complete.** Converts the raw, immutable output of a
 completed Stage 3 extraction into a separate, traceable normalized result:
 deterministic canonical values, with a structured field error wherever a value
-is invalid or ambiguous. No AI or external-network call. It does not implement
-business validation, confidence thresholds, totals reconciliation, duplicate
-decisions, acceptance/rejection, escalation, or human review. Full spec —
-contract, pinned policies, persistence layout, API, verification map — in
-`docs/stage-4-normalization.md`. Key code:
+is invalid or ambiguous. No AI or external-network call; no business
+validation, confidence thresholds, reconciliation, or decisions. Full spec,
+pinned policies, persistence layout, API, and verification map:
+`docs/stage-4-normalization.md`. Code lives under
+`backend/app/services/processing/normalization/` (normalizers, engine,
+lifecycle, repository, service), `backend/app/models/normalization.py`
+(migration `0003_normalization_tables`), `backend/app/schemas/normalization*.py`,
+`backend/app/api/normalizations.py`. Each normalizer applies only the cleanup
+its field policy permits (currency/numbers skip the broad text cleanup, so a
+hidden control character becomes a field error, not a silent repair). A
+field-level error never fails the attempt; only an engine or persistence
+fault does, rolling back to `FAILED` with no partial result.
 
-- Contract: `backend/app/schemas/normalization.py` (`NormalizedInvoice` etc.;
-  single canonical value or `null` per field, no confidence; a structured error
-  records `field_path`, stringified `raw_value`, closed `code`, safe `message`).
-- Policies (dates, numbers, currency, symbols, whitespace, empty, text limits,
-  failure behaviour): fixed in `docs/stage-4-normalization.md`.
-  `NormalizationErrorCode` is six members; numeric dates of undetermined
-  day/month order read day-first (`DD/MM/YYYY`); money/quantity arrive as
-  `Decimal` and pass through with sign and scale intact, never rounded.
-- Persistence: `backend/app/models/normalization.py` (`invoice_normalizations`
-  / `invoice_normalized_line_items` / `invoice_normalization_errors`, keyed
-  `(extraction_id, attempt_number)` + partial unique index for one active
-  attempt); migration `0003_normalization_tables`.
-- Schemas: `normalization_persistence.py` (nested↔flat bridge, no
-  `_value`/`_confidence` split), `normalization_api.py`, `pipeline_api.py`.
-- Normalizers: `backend/app/services/processing/normalization/normalizers.py` +
-  `iso4217.py` — `normalize_date` / `_currency` / `_money` / `_quantity` /
-  `_text` / `_invoice_number` / `_tax_id`, each returning a `NormResult`. Each
-  applies only the cleanup its field policy permits: currency and numbers do
-  NOT use the broad `clean_text`, so a hidden zero-width / control character
-  makes a value a field error, not a silently repaired value. Contract-invalid
-  non-`str` text raises, becoming a technical failure.
-- Engine / service / lifecycle:
-  `backend/app/services/processing/normalization/` (`engine.py`,
-  `repository.py`, `lifecycle.py`, `service.py`). `normalize_extraction` runs
-  the normalizers over every scalar and line item, attaching `field_path` +
-  `raw_value` to each field error. `NormalizationService.start` / `retry` lock
-  the source extraction row, commit a `PROCESSING` attempt before the engine
-  runs, then persist values + line items + errors and mark `COMPLETED` in one
-  transaction. A field-level error never fails the attempt; only an engine
-  exception or a persistence failure does — rolled back to a `FAILED` attempt
-  with a generic `NORMALIZATION_FAILED` reason and no partial result. The
-  source extraction, document row, and PDF are never modified.
-- API: `backend/app/api/normalizations.py` under
-  `/documents/{id}/extractions/{eid}/normalizations[...]` (start / retry / list
-  / latest / `{nid}`); response `InvoiceNormalizationResult` (canonical scalars
-  + `line_items` + `errors`, no confidence, no `document_id`, no diagnostics);
-  `404` `DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND`;
-  `409` `EXTRACTION_NOT_COMPLETED` / `NORMALIZATION_IN_PROGRESS` /
-  `EXTRACTION_ALREADY_NORMALIZED` / `NORMALIZATION_FAILED` /
-  `NORMALIZATION_NOT_FAILED`. A technical failure is still `201` with
-  `status = FAILED`.
-- Pipeline: `backend/app/services/processing/pipeline.py` (`ProcessingPipeline`)
-  + `backend/app/api/pipeline.py` — `POST /documents/{id}/pipeline[/retry]` runs
-  the extraction stage and then, only when it ended `COMPLETED`, the
-  normalization stage; response `PipelineRunResult`
-  (`{ extraction, normalization|null }`). It adds no processing rules; each
-  stage stays independently callable. No Stage 5 validation.
-- Tests: `backend/tests/test_normalization_{contract,model,normalizers,schemas,
-  service}.py`, `test_normalizations_api.py`, `test_pipeline{,_api}.py`, and
-  `test_stage4_verification.py` (the checklist, mostly end to end). "No
-  network" is proven by a `socket`-blocked engine run and a source scan of the
-  normalization package.
+**Stage 5 (deterministic invoice validation): complete.** Consumes the exact
+completed Stage 4 normalization attempt, evaluates a closed catalogue of 15
+deterministic rules, and records structured findings. It reports **facts
+only** — a rule violation completes validation with findings, not a technical
+failure — and never decides acceptance, rejection, or escalation, and never
+moves a document to `NEEDS_REVIEW` (that is Stage 6). No AI or
+external-network call. Full spec — boundary, pinned policies (⚠ values are
+provisional defaults pending review), rule catalogue, 14-step implementation
+order, verification map: `docs/stage-5-validation.md`. Code lives under
+`backend/app/services/processing/validation/` (`policy.py` vendors every ⚠
+constant and lives nowhere else; `rules.py`/`engine.py`/`lifecycle.py`/
+`repository.py`/`service.py` mirror the Stage 4 shape),
+`backend/app/models/validation.py` (migration `0004_validation_tables`),
+`backend/app/schemas/validation*.py`, `backend/app/api/validations.py`. A
+`null` per-field confidence is never read as high/low — it always emits an
+`info`-severity `critical_field_confidence_unavailable` finding, keeping rule
+semantics deterministic and provider-independent. `ProcessingPipeline`
+(`backend/app/services/processing/pipeline.py`) chains
+`extraction -> normalization -> validation -> decision` (the decision stage
+added in Stage 6 package 5) in one session; each stage stays independently
+callable via its own endpoints.
 
-**Stage 5 (deterministic invoice validation): all 14 steps done — Stage 5 is
-complete.** Stage 5 consumes the exact completed Stage 4 normalization
-attempt, evaluates a closed catalogue of deterministic rules, and records
-structured findings. It reports **facts only** — a rule violation completes
-validation with findings, not a technical failure — and never decides
-acceptance, rejection, or escalation or moves a document to `NEEDS_REVIEW` (that
-is the later decision stage). No AI or external-network call. The boundary, the
-pinned policies, the rule catalogue, the 14-step order, and the verification
-list are in `docs/stage-5-validation.md`.
+## Stage 6 (decision and escalation): complete
 
-Step 1 (boundary) and step 2 (policies) are the spec itself; step 3 (the
-internal contract) is `backend/app/schemas/validation.py` +
-`backend/tests/test_validation_contract.py` — `ValidationStatus` /
-`FindingSeverity` / `ValidationRule` (closed, 15 codes) / `ValidationFinding` /
-`ValidationSummary` / `InvoiceValidation` / `ValidatedInvoiceResult`, no
-decision vocabulary, `Decimal` serialised as strings, no `float` anywhere.
-Policy values marked ⚠ in the spec (required-field set, reconciliation
-tolerances, date windows, confidence threshold `0.70`, high-value thresholds,
-duplicate key) are provisional defaults for review; as of step 8 they live in
-`backend/app/services/processing/validation/policy.py` (vendored, not env
-config) and nowhere else. Step 4 (the rule catalogue) is
-`backend/app/schemas/validation_catalogue.py` +
-`backend/tests/test_validation_catalogue.py` — one `RuleSpec` per
-`ValidationRule` (import-time checked against the enum) giving each rule's
-inputs, `field_path` shape, severity shape, skip conditions, `context` keys, and
-fixed client-safe message; it embeds no ⚠ value, only a policy token per
-dependent rule. Step 5 (confidence limitations) is a pinned decision in §2.6,
-no code: a `null` per-field confidence emits `critical_field_confidence_
-unavailable` (`info`) and is never read as high/low or used to disable the
-`low_confidence_critical_field` check, keeping the rule semantics deterministic
-and provider-independent; outputs still reflect each provider's stored
-confidence inputs. The read of the five `<critical_field>_confidence` columns
-on the `invoice_extractions` row (via `invoice_normalizations.extraction_id`) is
-wired in step 9. Step 6 (persistence) is `backend/app/models/validation.py` +
-`backend/tests/test_validation_model.py` — `invoice_validations` (ORM
-`ValidationAttempt`, keyed `(normalization_id, attempt_number)`, partial unique
-index for one active `PROCESSING` attempt, status/failure CHECKs copied from
-Stage 4, lifecycle columns only — summary counts re-derived on read, never
-stored) and `invoice_validation_findings` (ORM `ValidationFindingRow`:
-`position`-ordered, `rule`/`severity` native enums of the public codes, nullable
-`field_path` with the Stage 4 shape CHECK or `NULL`, `expected`/`actual` display
-text, `context` JSONB); `NormalizationAttempt` gains a cascading `validations`
-relationship. JSONB binding losslessly stringifies contract `Decimal`/UUID
-values and rejects binary floats. Step 7 (migration) is
-`backend/alembic/versions/0004_validation_tables.py` (`down_revision
-0003_normalization_tables`), verified up / down / re-up on a throwaway database
-with seeded Stage 2–4 rows byte-unchanged and `alembic check` clean. Step 8 is
-`backend/app/services/processing/validation/{policy,rules}.py` (+
-`tests/test_validation_{policy,rules}.py`): `policy.py` now holds every ⚠ §2
-constant (tolerance `0.01`, `line_sum_tolerance(n)=max(0.01,0.01·n)`, date
-windows `365`/`10y`, confidence min `0.70`, high-value map + `10000` default,
-required/critical field set) as `Decimal`, and nowhere else; `rules.py` has one
-pure `check_<rule>(RuleContext)->list[ValidationFinding]` per catalogue member
-(message + default severity from the catalogue), all arithmetic in an
-input-sized `Decimal` context so no contract-valid value rounds and no `float`
-appears, immutable `RULE_FUNCTIONS` +
-`run_rules` covering every rule in `position` order. Step 9 (engine) is
-`backend/app/services/processing/validation/engine.py` (+
-`tests/test_validation_engine.py`): read-only `evaluate(session,
-normalization_id, *, started_at)` loads the attempt + its errors, reads the five
-`<critical_field>_confidence` columns from the source `invoice_extractions` row,
-builds the §2.5 candidate set (latest COMPLETED extraction → latest COMPLETED
-normalization per *other* document, applying `completed_at <= started_at` to
-both stages, no older-
-extraction fall-back), and returns
-`InvoiceValidation.from_findings(run_rules(ctx))` with `run_date = started_at`
-(UTC date); a test asserts it writes nothing. Step 10 (lifecycle) is
-`backend/app/services/processing/validation/lifecycle.py` (+
-`tests/test_validation_lifecycle.py`), mirroring Stage 4:
-`ensure_normalization_can_validate(...)` raises `ConflictError` (409) with
-`NORMALIZATION_NOT_COMPLETED` / `VALIDATION_IN_PROGRESS` /
-`NORMALIZATION_ALREADY_VALIDATED` / `VALIDATION_FAILED` /
-`VALIDATION_NOT_FAILED`; `ensure_attempt_transition` allows only
-`PROCESSING → COMPLETED | FAILED`. A rule violation is a finding on a `COMPLETED`
-attempt, never `FAILED`. Step 11 (service + repository) is
-`backend/app/schemas/validation_persistence.py` (the `InvoiceValidation` <->
-flat-row bridge, mirroring `normalization_persistence.py`; `expected`/`actual`
-stored as display strings) and
-`backend/app/services/processing/validation/{repository,service}.py` (+
-`tests/test_validation_{persistence,service}.py`): `ValidationRepository` is the
-sole reader/writer of the two tables; `ValidationService.start`/`retry` mirror
-`NormalizationService` exactly — `SELECT ... FOR UPDATE` on the source
-`invoice_normalizations` row, a `PROCESSING` attempt flushed and **committed
-before the engine runs**, findings persisted + marked `COMPLETED` in one
-transaction, any fault (engine or persistence) rolled back to a generic
-`VALIDATION_FAILED` with zero partial finding rows, history preserved, no
-Stage 2–4 row ever written to. Step 12 (API) is
-`backend/app/schemas/validation_api.py` (`ValidationStartRequest` +
-`InvoiceValidationResult` — status, timestamps, `failure_*`,
-`data: InvoiceValidation`, mirroring `normalization_api.py`) and
-`backend/app/api/validations.py` (+ `tests/test_validations_api.py`), wired
-into `deps.py` (`get_validation_service`) and `router.py`: `POST` / `POST
-…/retry` / `GET` / `GET …/latest` / `GET …/{vid}` under
-`/documents/{id}/extractions/{eid}/normalizations/{nid}/validations`; `404`
-`DOCUMENT_NOT_FOUND` / `EXTRACTION_NOT_FOUND` / `NORMALIZATION_NOT_FOUND` /
-`VALIDATION_NOT_FOUND`; `409` the step 10 lifecycle codes; an empty body is
-valid and an unknown body key is `422`; a technical failure is still `201`
-with `status = FAILED`. Step 13 (pipeline) is
-`backend/app/services/processing/pipeline.py` (+ `tests/test_pipeline.py`,
-`tests/test_pipeline_api.py`): `ProcessingPipeline.run` chains
-`extraction -> normalization -> validation` in one session, gaining a third
-stage — `_continue_to_validation` calls `ValidationService.start` only when
-normalization ended `COMPLETED`, mirroring `_continue_to_normalization`
-exactly, including swallowing an "attempt already exists" `ConflictError`
-(`VALIDATION_IN_PROGRESS` / `NORMALIZATION_ALREADY_VALIDATED` /
-`VALIDATION_FAILED`) by returning the latest existing attempt instead of
-forcing a second one, and re-loading every attempt after the run so a later
-stage's rollback never hands back an expired row. `PipelineResult` /
-`PipelineRunResult` (`backend/app/schemas/pipeline_api.py`) gain
-`validation: InvoiceValidationResult | null`, `null` exactly when
-`normalization` is absent or did not complete; no rule logic moved into the
-pipeline. Step 14 (verification tests and documentation) is
-`backend/tests/test_stage5_verification.py`, mirroring
-`test_stage4_verification.py`: a bullet-to-test map in the module docstring
-points every checklist item at its exhaustive coverage from steps 3–12 (the
-rule catalogue, deterministic rule functions, engine, persistence, lifecycle,
-and API test files), and the file itself adds only what had no automated
-coverage yet — golden clean/many-finding/duplicate invoices run end to end
-through the real API and pipeline, an API-level concurrent-start race, a
-full-chain byte-for-byte immutability check (`documents` /
-`invoice_extractions` / `invoice_normalizations*` rows and the stored PDF
-bytes, before vs. after a validation call), an `alembic upgrade head ->
-downgrade -1 -> upgrade head -> check` round trip against a dedicated
-throwaway database proving Stage 2–4 data survives byte-for-byte, and a
-schema-layer AI-SDK-import guard mirroring Stage 4's. README updated to
-match. Stage 5 is now fully implemented end to end.
+**Status: complete — all 6 packages done.** Stage 6 consumes persisted
+processing results and determines whether an invoice can be accepted or needs
+human review. Full boundary, policy (including the complete 15-rule → decision-reason
+mapping), contract, persistence design, engine design, and lifecycle/document-
+status design are in `docs/stage-6-decision.md`. Package 1 code:
+`backend/app/schemas/decision.py` + `decision_catalogue.py` (with
+`backend/tests/test_decision_{contract,catalogue}.py`). Package 2 code:
+`backend/app/models/decision.py`, migration `0005_decision_tables`,
+`backend/app/schemas/decision_persistence.py`,
+`backend/app/services/processing/decision/repository.py` (with
+`backend/tests/test_decision_{model,persistence,repository}.py`); verified
+against real PostgreSQL (`alembic upgrade head -> downgrade -1 -> upgrade
+head -> check`, Stage 2–5 data preserved byte-for-byte). Package 3 code:
+`backend/app/services/processing/decision/engine.py` — a pure
+`decide(validation, *, manual_review_requested) -> InvoiceDecision`, no
+session/AI/network call, with `backend/tests/test_decision_engine.py`.
+Package 4 code: `backend/app/services/processing/decision/{lifecycle,
+service}.py` — `DecisionService` mirrors `ValidationService` (source lock,
+committed `PROCESSING`, generic `FAILED` on any technical fault, explicit
+retry, one active attempt per validation) and additionally locks and writes
+the owning `documents` row: `NEEDS_REVIEW` on that outcome, unchanged
+(`COMPLETED`) on `ACCEPTED` or on a technical decision failure, and a
+`STALE_VALIDATION_SOURCE` 409 if the validation is no longer the document's
+current extraction/normalization chain (not reachable via today's API, kept
+as a defensive guard) — with `backend/tests/test_decision_{lifecycle,
+service}.py`. Package 5 code: `backend/app/api/decisions.py` (scoped
+start/retry/list/latest/specific routes under
+`.../validations/{vid}/decisions`), `backend/app/schemas/decision_api.py`
+(`DecisionStartRequest` with a strict `manual_review_requested` bool;
+`InvoiceDecisionResult` whose `data` is the `InvoiceDecision` only on a
+`COMPLETED` attempt, `null` while `PROCESSING`/`FAILED`), `get_decision_service`
+in `backend/app/api/deps.py`, `manual_review_requested` threaded through
+`DecisionService.start`/`retry`, and a fourth pipeline stage
+(`ProcessingPipeline._continue_to_decision`, `PipelineRunResult.decision`,
+`PipelineRunRequest.manual_review_requested`) that runs the decision only on a
+`COMPLETED` validation and leaves `decision=null` otherwise — with
+`backend/tests/test_decisions_api.py` and additions to
+`backend/tests/test_pipeline{,_api}.py`. Package 6 code:
+`backend/tests/test_stage6_verification.py` — one executable pass over the
+Stage 6 acceptance checklist through the composed stack (clean acceptance,
+every review trigger incl. the `high_value_invoice` elevation, the all-`null`
+confidence GPT-5-mini shape still accepting, manual review, upstream/technical
+failures, retries, HTTP-level concurrency, and the stale-source guard), plus
+the `0005_decision_tables` migration round trip, byte-for-byte source
+immutability with only `documents.status` changing (and only to
+`NEEDS_REVIEW`), and the decision-subsystem "no AI / no network" guards. Full
+checklist → coverage map and the run result are in
+`docs/stage-6-decision.md` "## Verification". The six-package plan below is
+kept for history.
+
+1. **Boundary, decision policy, and contracts.** Write
+   `docs/stage-6-decision.md` before implementation. Define the input lineage,
+   outcome/reason enums, public result shape, and a complete mapping of all 15
+   Stage 5 rules to decision reasons and outcomes. Specify precedence when
+   multiple findings apply, clean-invoice acceptance, manual-review requests,
+   missing confidence, and failed/unusable upstream processing. Treat proposed
+   business policies as provisional until agreed; do not infer acceptance from
+   severity counts alone. In particular, GPT-5-mini supplies `null` confidence:
+   decide explicitly whether unavailable critical-field confidence requires
+   review, and never interpret it as high confidence. Reuse Stage 5 findings
+   and thresholds rather than recalculating validation. Define technical attempt
+   status separately from business outcome; automatic rejection and human
+   approval/rejection remain outside this stage. Add contract/policy tests.
+2. **Persistence, migration, and audit representation.** Add decision attempt
+   and reason models, persistence schemas, repository, and an Alembic migration
+   together. Preserve source attempt IDs, ordered reasons and their finding
+   references, timestamps, and the policy version needed to explain an outcome.
+   Decide how upstream failures without a completed validation are represented
+   without fabricating a successful validation. Preserve history, enforce one
+   active attempt per defined source, and verify migration upgrade/downgrade
+   and lossless result round trips on PostgreSQL.
+3. **Deterministic decision engine.** Implement the agreed mapping in
+   `backend/app/services/processing/decision/`, with centralized policy and a
+   pure evaluator. Produce stable outcomes and explainable reasons for clean
+   invoices, conflicting findings, duplicate/high-value flags, missing or low
+   confidence, manual review, and the agreed upstream-failure cases. No AI,
+   external calls, invented confidence, discarded values, or mutation of
+   extraction, normalization, or validation results. Test the full decision
+   matrix and determinism.
+4. **Lifecycle, orchestration, and document status.** Add service and lifecycle
+   guards together: source locking, committed processing attempt, atomic final
+   outcome/reasons, safe technical failure, explicit retry, concurrent-start
+   protection, and preserved history. Pin the document-status mapping in the
+   spec first: existing `COMPLETED` means extraction completion, not business
+   acceptance. Integrate `NEEDS_REVIEW` deliberately and prevent an old source
+   attempt from overwriting the current document outcome. Inspect extraction
+   start/retry guards for compatibility. A review outcome is a successful
+   decision, not a `FAILED` decision attempt. Test races, stale sources, retries,
+   rollback, and document transitions.
+5. **API and pipeline integration.** Add scoped start/retry/list/latest/specific
+   decision routes, dependency wiring, and safe response/error schemas as one
+   package. Extend the composed pipeline response with the decision result;
+   implement the agreed stop/escalation behavior for failed upstream stages.
+   Preserve independent stage endpoints and existing response fields. Keep
+   policy inside the decision subsystem. Define manual-review input and its
+   interaction with an existing outcome explicitly. Test ownership/lineage
+   checks, `404`/`409` behavior, failed attempts, and the complete pipeline.
+6. **End-to-end verification and documentation.** Verify clean acceptance,
+   each review trigger, multiple reasons, unavailable confidence with the real
+   provider's stored input shape, upstream failures, manual requests, retries,
+   concurrency, and stale-source protection. Prove earlier stage results and
+   original PDFs remain unchanged, and only the explicitly authorized document
+   status fields change. Run relevant backend regression checks and migration
+   checks; update this handoff, the stage spec, and READMEs with actual results.
+
+**Scope limits:** backend decision/routing only. A review outcome prepares the
+later review workflow; it does not build review screens, editing, notifications,
+human approval/rejection, or downstream posting. Any read-only frontend work
+should be separately requested.
 
 ## Technology decisions
 
@@ -261,7 +210,7 @@ Browser -> Next.js frontend -> FastAPI document API
        |-- Extraction             <- Stage 3 (done)
        |-- Normalization          <- Stage 4 (done)
        |-- Validation             <- Stage 5 (done)
-       `-- Decision / escalation  <- later
+       `-- Decision / escalation  <- Stage 6 (done)
 ```
 
 Extraction and normalization are separate backend subsystems. Provider-specific
@@ -383,12 +332,8 @@ commit credentials or machine-specific values.
 Do not implement these unless the user explicitly adds them to the current
 stage's scope:
 
-- Deterministic invoice validation and total/line-item reconciliation
-- Confidence thresholds or discarding uncertain fields
+- Discarding uncertain fields (Stage 5 confidence findings are implemented)
 - Defaulting missing currency or converting currencies
-- Duplicate-invoice decisions
-- Escalation decisions and `NEEDS_REVIEW` transitions
-- High-value invoice rules
 - Human-review screens, editing, approval, or rejection
 - Downstream business-database integration
 - Authentication, organizations, or multi-tenancy
@@ -396,9 +341,9 @@ stage's scope:
 - Images or non-PDF upload support
 - Autonomous or multi-agent processing
 
-Deferred validation, confidence, and escalation context lives in
-`docs/processing-spec.md`. The current stage may read it to keep contracts
-compatible but must not implement its deferred decisions.
+Deterministic validation, reconciliation, confidence checks, and duplicate /
+high-value findings are already implemented in Stage 5. Decision and escalation
+work, including `NEEDS_REVIEW`, belongs to the Stage 6 plan above.
 
 ## Implementation conduct
 

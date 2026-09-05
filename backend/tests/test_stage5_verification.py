@@ -219,8 +219,13 @@ async def test_golden_clean_invoice_validates_with_no_findings_end_to_end(
     data = body["validation"]["data"]
     assert data["findings"] == []
     assert data["summary"] == {"total": 0, "error": 0, "warning": 0, "info": 0}
-    # no decision vocabulary anywhere in the response (§1.7 boundary)
-    assert "NEEDS_REVIEW" not in str(body) and "ACCEPTED" not in str(body)
+    # no decision vocabulary in the validation result itself (§1.7 boundary) -
+    # Stage 5 reports facts, not a decision. The pipeline envelope's separate
+    # ``decision`` block (Stage 6) is where an outcome legitimately appears.
+    assert "NEEDS_REVIEW" not in str(body["validation"])
+    assert "ACCEPTED" not in str(body["validation"])
+    assert body["decision"]["status"] == "COMPLETED"
+    assert body["decision"]["outcome"] == "ACCEPTED"
 
 
 # --- golden invoice: many rules fire together, end to end ---------------

@@ -64,6 +64,7 @@ from app.schemas.normalization import (
 from app.schemas.validation import FindingSeverity, ValidationRule, ValidationStatus
 
 if TYPE_CHECKING:
+    from app.models.decision import DecisionAttempt
     from app.models.normalization import NormalizationAttempt
 
 __all__ = [
@@ -199,6 +200,14 @@ class ValidationAttempt(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="ValidationFindingRow.position",
+    )
+    # Stage 6 decision attempts over this validation attempt, oldest first.
+    # Added in Stage 6; does not affect any Stage 5 behaviour.
+    decisions: Mapped[list["DecisionAttempt"]] = relationship(
+        back_populates="source_validation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="DecisionAttempt.attempt_number",
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

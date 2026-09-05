@@ -1,3 +1,10 @@
+from app.models.decision import (
+    DecisionAttempt,
+    DecisionOutcome,
+    DecisionReasonCode,
+    DecisionReasonRow,
+    DecisionStatus,
+)
 from app.models.document import Document, DocumentStatus
 from app.models.extraction import ExtractionAttempt, ExtractionLineItem, ExtractionStatus
 from app.models.normalization import (
@@ -31,4 +38,9 @@ __all__ = [
     "ValidationFindingRow",
     "ValidationRule",
     "ValidationStatus",
+    "DecisionAttempt",
+    "DecisionOutcome",
+    "DecisionReasonCode",
+    "DecisionReasonRow",
+    "DecisionStatus",
 ]

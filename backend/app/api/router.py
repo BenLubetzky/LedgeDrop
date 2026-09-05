@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api import (
+    decisions,
     documents,
     extractions,
     health,
@@ -19,4 +20,5 @@ api_router.include_router(documents.router)
 api_router.include_router(extractions.router)
 api_router.include_router(normalizations.router)
 api_router.include_router(validations.router)
+api_router.include_router(decisions.router)
 api_router.include_router(pipeline.router)

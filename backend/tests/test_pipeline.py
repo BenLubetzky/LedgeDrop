@@ -1,10 +1,11 @@
-"""Tests for the composed processing pipeline (Stage 4 step 13; Stage 5 step 13).
+"""Tests for the composed processing pipeline (Stage 4 step 13; Stage 5 step 13;
+Stage 6 package 5).
 
-The pipeline chains ``ExtractionService``, ``NormalizationService``, and
-``ValidationService`` against one session. These run at the service layer (via
-``db_session``) with a plain callable extraction producer - no AI provider is
-involved. The per-stage services are exercised directly too, to prove they
-stay independently callable.
+The pipeline chains ``ExtractionService``, ``NormalizationService``,
+``ValidationService``, and ``DecisionService`` against one session. These run
+at the service layer (via ``db_session``) with a plain callable extraction
+producer - no AI provider is involved. The per-stage services are exercised
+directly too, to prove they stay independently callable.
 """
 
 from __future__ import annotations
@@ -25,12 +26,16 @@ from app.models import (
     NormalizationAttempt,
     NormalizationStatus,
 )
+from app.models.decision import DecisionAttempt, DecisionOutcome, DecisionStatus
 from app.models.validation import ValidationAttempt, ValidationStatus
 from app.schemas.extraction import InvoiceExtraction
+from app.services.processing.decision import DecisionRepository, DecisionService
 from app.services.processing.extraction import ExtractionService
 from app.services.processing.normalization import NormalizationRepository, NormalizationService
 from app.services.processing.pipeline import Action, ProcessingPipeline
 from app.services.processing.validation import ValidationRepository, ValidationService
+
+_DECIDE_PATH = "app.services.processing.decision.service.decide"
 
 _NORMALIZATION_ENGINE_PATH = (
     "app.services.processing.normalization.service.normalize_extraction"
@@ -58,9 +63,9 @@ def _contract() -> InvoiceExtraction:
             "line_items": [
                 {
                     "description": _field("Widget"),
-                    "quantity": _field("2"),
+                    "quantity": _field("10"),
                     "unit_price": _field("10.00"),
-                    "line_total": _field("20.00"),
+                    "line_total": _field("100.00"),
                 }
             ],
         }
@@ -94,7 +99,7 @@ async def _boom(_doc: Document) -> InvoiceExtraction:
 # --- happy path --------------------------------------------------------
 
 
-async def test_run_chains_extraction_normalization_validation(
+async def test_run_chains_extraction_normalization_validation_decision(
     db_session: AsyncSession,
 ) -> None:
     doc = await _make_document(db_session)
@@ -119,9 +124,89 @@ async def test_run_chains_extraction_normalization_validation(
     assert result.validation.normalization_id == result.normalization.normalization_id
     assert result.validation.attempt_number == 1
 
+    # The decision stage runs on the completed validation. This invoice's only
+    # Stage 5 findings are non-gating (per-field confidence is unavailable), so
+    # it is ACCEPTED and the document stays COMPLETED.
+    assert result.decision is not None
+    assert result.decision.status is DecisionStatus.COMPLETED
+    assert result.decision.outcome is DecisionOutcome.ACCEPTED
+    assert result.decision.validation_id == result.validation.validation_id
+    assert result.decision.attempt_number == 1
+
     db_session.expire_all()
     reloaded_doc = await db_session.get(Document, document_id)
     assert reloaded_doc.status is DocumentStatus.COMPLETED
+
+
+async def test_run_escalates_a_gating_finding_to_needs_review(
+    db_session: AsyncSession,
+) -> None:
+    doc = await _make_document(db_session)
+    document_id = doc.document_id
+
+    async def gating(_doc: Document) -> InvoiceExtraction:
+        # Line totals no longer sum to the subtotal -> line_items_do_not_sum,
+        # a gating Stage 5 finding.
+        return InvoiceExtraction.model_validate(
+            {
+                "invoice_number": _field("INV-77"),
+                "invoice_date": _field("3 March 2026"),
+                "due_date": _field(None),
+                "vendor_name": _field("Acme GmbH"),
+                "vendor_tax_id": _field("DE 123 456 789"),
+                "customer_name": _field("Beta Ltd"),
+                "currency": _field("eur"),
+                "subtotal": _field("100.00"),
+                "tax_amount": _field("19.00"),
+                "total_amount": _field("119.00"),
+                "line_items": [
+                    {
+                        "description": _field("Widget"),
+                        "quantity": _field("2"),
+                        "unit_price": _field("10.00"),
+                        "line_total": _field("20.00"),
+                    }
+                ],
+            }
+        )
+
+    result = await ProcessingPipeline(db_session).run(
+        document_id, produce=gating, provider_name="fake"
+    )
+
+    assert result.validation is not None
+    assert result.validation.status is ValidationStatus.COMPLETED
+    assert result.decision is not None
+    assert result.decision.status is DecisionStatus.COMPLETED
+    assert result.decision.outcome is DecisionOutcome.NEEDS_REVIEW
+    assert any(r.triggers_review for r in result.decision.reasons)
+
+    db_session.expire_all()
+    reloaded_doc = await db_session.get(Document, document_id)
+    assert reloaded_doc.status is DocumentStatus.NEEDS_REVIEW
+
+
+async def test_run_forwards_manual_review_request_to_the_decision(
+    db_session: AsyncSession,
+) -> None:
+    doc = await _make_document(db_session)
+    document_id = doc.document_id
+
+    result = await ProcessingPipeline(db_session).run(
+        document_id,
+        produce=_ok,
+        provider_name="fake",
+        manual_review_requested=True,
+    )
+
+    assert result.decision is not None
+    assert result.decision.outcome is DecisionOutcome.NEEDS_REVIEW
+    codes = [r.code.value for r in result.decision.reasons]
+    assert codes[-1] == "manual_review_requested"
+
+    db_session.expire_all()
+    reloaded_doc = await db_session.get(Document, document_id)
+    assert reloaded_doc.status is DocumentStatus.NEEDS_REVIEW
 
 
 # --- extraction stops the chain -------------------------------------
@@ -137,12 +222,15 @@ async def test_run_stops_when_extraction_fails(db_session: AsyncSession) -> None
     assert result.extraction.status is ExtractionStatus.FAILED
     assert result.normalization is None
     assert result.validation is None
+    assert result.decision is None
 
     count = await db_session.scalar(
         select(func.count()).select_from(NormalizationAttempt)
     )
     assert count == 0
     count = await db_session.scalar(select(func.count()).select_from(ValidationAttempt))
+    assert count == 0
+    count = await db_session.scalar(select(func.count()).select_from(DecisionAttempt))
     assert count == 0
 
 
@@ -170,9 +258,12 @@ async def test_normalization_failure_does_not_undo_the_extraction(
     assert result.normalization.failure_code == "NORMALIZATION_FAILED"
     assert "sk-secret" not in (result.normalization.failure_message or "")
 
-    # No stable normalization to validate.
+    # No stable normalization to validate, so nothing to decide either.
     assert result.validation is None
+    assert result.decision is None
     count = await db_session.scalar(select(func.count()).select_from(ValidationAttempt))
+    assert count == 0
+    count = await db_session.scalar(select(func.count()).select_from(DecisionAttempt))
     assert count == 0
 
 
@@ -200,6 +291,43 @@ async def test_validation_failure_does_not_undo_the_normalization(
     assert result.validation.status is ValidationStatus.FAILED
     assert result.validation.failure_code == "VALIDATION_FAILED"
     assert "sk-secret" not in (result.validation.failure_message or "")
+
+    # A failed validation is not decidable.
+    assert result.decision is None
+    count = await db_session.scalar(select(func.count()).select_from(DecisionAttempt))
+    assert count == 0
+
+
+# --- decision technical failure leaves validation intact ---------------
+
+
+async def test_decision_failure_does_not_undo_the_validation(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = await _make_document(db_session)
+    document_id = doc.document_id
+
+    def engine_boom(*_args, **_kwargs):
+        raise RuntimeError("decision engine crash key=sk-secret")
+
+    monkeypatch.setattr(_DECIDE_PATH, engine_boom)
+
+    result = await ProcessingPipeline(db_session).run(
+        document_id, produce=_ok, provider_name="fake"
+    )
+
+    assert result.validation is not None
+    assert result.validation.status is ValidationStatus.COMPLETED
+    assert result.decision is not None
+    assert result.decision.status is DecisionStatus.FAILED
+    assert result.decision.failure_code == "DECISION_FAILED"
+    assert result.decision.outcome is None
+    assert list(result.decision.reasons) == []
+    assert "sk-secret" not in (result.decision.failure_message or "")
+
+    db_session.expire_all()
+    reloaded_doc = await db_session.get(Document, document_id)
+    assert reloaded_doc.status is DocumentStatus.COMPLETED
 
 
 # --- retry -----------------------------------------------------------
@@ -349,6 +477,58 @@ async def test_continue_to_validation_skips_a_missing_or_incomplete_normalizatio
 ) -> None:
     pipeline = ProcessingPipeline(db_session)
     assert await pipeline._continue_to_validation(None) is None
+
+
+# --- defensive: decision already present ----------------------------
+
+
+async def test_continue_returns_existing_decision_on_conflict(
+    db_session: AsyncSession,
+) -> None:
+    doc = await _make_document(db_session)
+    extraction = await ExtractionService(db_session).start(
+        doc.document_id, produce=_ok, provider_name="fake"
+    )
+    normalization = await NormalizationService(db_session).start(extraction.extraction_id)
+    validation = await ValidationService(db_session).start(normalization.normalization_id)
+    # A decision attempt started directly on its own service.
+    existing = await DecisionService(db_session).start(validation.validation_id)
+
+    got = await ProcessingPipeline(db_session)._continue_to_decision(validation)
+
+    assert got is not None
+    assert got.decision_id == existing.decision_id
+    # No second attempt was created.
+    count = await db_session.scalar(select(func.count()).select_from(DecisionAttempt))
+    assert count == 1
+
+
+async def test_continue_does_not_hide_unrelated_decision_conflicts(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doc = await _make_document(db_session)
+    extraction = await ExtractionService(db_session).start(
+        doc.document_id, produce=_ok, provider_name="fake"
+    )
+    normalization = await NormalizationService(db_session).start(extraction.extraction_id)
+    validation = await ValidationService(db_session).start(normalization.normalization_id)
+    pipeline = ProcessingPipeline(db_session)
+
+    async def reject(_validation_id, *, manual_review_requested=False):
+        raise ConflictError("Unexpected lifecycle conflict.", code="UNEXPECTED_CONFLICT")
+
+    monkeypatch.setattr(pipeline._decision, "start", reject)
+
+    with pytest.raises(ConflictError) as excinfo:
+        await pipeline._continue_to_decision(validation)
+    assert excinfo.value.code == "UNEXPECTED_CONFLICT"
+
+
+async def test_continue_to_decision_skips_a_missing_or_incomplete_validation(
+    db_session: AsyncSession,
+) -> None:
+    pipeline = ProcessingPipeline(db_session)
+    assert await pipeline._continue_to_decision(None) is None
 
 
 # --- stages remain independently callable --------------------------
