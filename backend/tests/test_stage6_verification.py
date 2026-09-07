@@ -987,7 +987,12 @@ async def test_migration_upgrade_downgrade_preserves_stage2_5_data() -> None:
         assert len(before["invoice_decisions"]) == 1
         assert len(before["invoice_decision_reasons"]) == 1
 
-        _run_alembic("downgrade", "-1", database_url=database_url)
+        # Downgrade past 0005 explicitly rather than "-1": once a later
+        # migration (Stage 7's 0006_review_tables) is head, "-1" no longer
+        # targets the Stage 6 migration this test is about.
+        _run_alembic(
+            "downgrade", "0004_validation_tables", database_url=database_url
+        )
         _run_alembic("upgrade", "head", database_url=database_url)
         _run_alembic("check", database_url=database_url)
 

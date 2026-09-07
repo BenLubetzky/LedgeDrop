@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   ChangeEvent,
   DragEvent,
@@ -402,7 +403,9 @@ export function DocumentDashboard() {
           <span className="brand-mark" aria-hidden="true">L</span>
           <span className="brand-name">LedgerDrop</span>
         </a>
-        <span className="stage-label">Invoice workspace</span>
+        <Link className="stage-label review-nav-link" href="/review">
+          Review queue &rarr;
+        </Link>
       </header>
 
       <div className="workspace" id="main-content">

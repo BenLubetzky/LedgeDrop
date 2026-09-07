@@ -779,8 +779,70 @@ added, this flag is one of the inputs it will need to gate.
 
 ## Implementation order
 
-See `CLAUDE.md`'s Stage 6 handoff for the full six-package plan and scope
-limits. Summary of status:
+The full six-package plan (kept here for history; every package is done — see
+the status list and the Part sections above for the code that landed):
+
+1. **Boundary, decision policy, and contracts.** Write
+   `docs/stage-6-decision.md` before implementation. Define the input lineage,
+   outcome/reason enums, public result shape, and a complete mapping of all 15
+   Stage 5 rules to decision reasons and outcomes. Specify precedence when
+   multiple findings apply, clean-invoice acceptance, manual-review requests,
+   missing confidence, and failed/unusable upstream processing. Treat proposed
+   business policies as provisional until agreed; do not infer acceptance from
+   severity counts alone. In particular, GPT-5-mini supplies `null` confidence:
+   decide explicitly whether unavailable critical-field confidence requires
+   review, and never interpret it as high confidence. Reuse Stage 5 findings
+   and thresholds rather than recalculating validation. Define technical attempt
+   status separately from business outcome; automatic rejection and human
+   approval/rejection remain outside this stage. Add contract/policy tests.
+2. **Persistence, migration, and audit representation.** Add decision attempt
+   and reason models, persistence schemas, repository, and an Alembic migration
+   together. Preserve source attempt IDs, ordered reasons and their finding
+   references, timestamps, and the policy version needed to explain an outcome.
+   Decide how upstream failures without a completed validation are represented
+   without fabricating a successful validation. Preserve history, enforce one
+   active attempt per defined source, and verify migration upgrade/downgrade
+   and lossless result round trips on PostgreSQL.
+3. **Deterministic decision engine.** Implement the agreed mapping in
+   `backend/app/services/processing/decision/`, with centralized policy and a
+   pure evaluator. Produce stable outcomes and explainable reasons for clean
+   invoices, conflicting findings, duplicate/high-value flags, missing or low
+   confidence, manual review, and the agreed upstream-failure cases. No AI,
+   external calls, invented confidence, discarded values, or mutation of
+   extraction, normalization, or validation results. Test the full decision
+   matrix and determinism.
+4. **Lifecycle, orchestration, and document status.** Add service and lifecycle
+   guards together: source locking, committed processing attempt, atomic final
+   outcome/reasons, safe technical failure, explicit retry, concurrent-start
+   protection, and preserved history. Pin the document-status mapping in the
+   spec first: existing `COMPLETED` means extraction completion, not business
+   acceptance. Integrate `NEEDS_REVIEW` deliberately and prevent an old source
+   attempt from overwriting the current document outcome. Inspect extraction
+   start/retry guards for compatibility. A review outcome is a successful
+   decision, not a `FAILED` decision attempt. Test races, stale sources, retries,
+   rollback, and document transitions.
+5. **API and pipeline integration.** Add scoped start/retry/list/latest/specific
+   decision routes, dependency wiring, and safe response/error schemas as one
+   package. Extend the composed pipeline response with the decision result;
+   implement the agreed stop/escalation behavior for failed upstream stages.
+   Preserve independent stage endpoints and existing response fields. Keep
+   policy inside the decision subsystem. Define manual-review input and its
+   interaction with an existing outcome explicitly. Test ownership/lineage
+   checks, `404`/`409` behavior, failed attempts, and the complete pipeline.
+6. **End-to-end verification and documentation.** Verify clean acceptance,
+   each review trigger, multiple reasons, unavailable confidence with the real
+   provider's stored input shape, upstream failures, manual requests, retries,
+   concurrency, and stale-source protection. Prove earlier stage results and
+   original PDFs remain unchanged, and only the explicitly authorized document
+   status fields change. Run relevant backend regression checks and migration
+   checks; update this handoff, the stage spec, and READMEs with actual results.
+
+**Scope limits:** backend decision/routing only. A review outcome prepares the
+Stage 7 review workflow; it does not build review screens, editing,
+notifications, human approval/rejection, or downstream posting. Any read-only
+frontend work should be separately requested.
+
+Status by package:
 
 1. **Boundary, decision policy, and contracts.** *(Done — this document, plus
    `app/schemas/decision.py` and `app/schemas/decision_catalogue.py` with

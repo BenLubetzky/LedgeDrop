@@ -30,6 +30,7 @@ from app.services.processing.extraction.provider import ExtractionProvider, Prov
 from app.services.processing.decision import DecisionService
 from app.services.processing.normalization import NormalizationService
 from app.services.processing.pipeline import ProcessingPipeline
+from app.services.processing.review import ReviewService
 from app.services.processing.validation import ValidationService
 from app.services.storage import LocalFileStorage
 
@@ -42,6 +43,7 @@ __all__ = [
     "get_normalization_service",
     "get_validation_service",
     "get_decision_service",
+    "get_review_service",
     "get_pipeline",
 ]
 
@@ -93,6 +95,19 @@ def get_decision_service(
     authorized ``documents.status`` transition to ``NEEDS_REVIEW``.
     """
     return DecisionService(db)
+
+
+def get_review_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ReviewService:
+    """Build a :class:`ReviewService` bound to the request's session.
+
+    Reviewing is a database-only operation - no provider, no AI, no network.
+    The service reads the source Stage 6 decision chain and writes only its own
+    ``invoice_reviews`` row plus the one authorised ``documents.status``
+    transition (``NEEDS_REVIEW -> APPROVED | REJECTED``).
+    """
+    return ReviewService(db)
 
 
 def get_pipeline(

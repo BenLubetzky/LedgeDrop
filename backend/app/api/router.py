@@ -11,6 +11,7 @@ from app.api import (
     health,
     normalizations,
     pipeline,
+    reviews,
     validations,
 )
 
@@ -21,4 +22,5 @@ api_router.include_router(extractions.router)
 api_router.include_router(normalizations.router)
 api_router.include_router(validations.router)
 api_router.include_router(decisions.router)
+api_router.include_router(reviews.router)
 api_router.include_router(pipeline.router)

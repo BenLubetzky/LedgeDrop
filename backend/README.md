@@ -8,7 +8,11 @@ deterministic **validation** of a completed normalization; Stage 6 added the
 deterministic **decision** over a completed validation — `ACCEPTED` or
 `NEEDS_REVIEW`, with ordered reasons — wired together as
 `upload → extraction → normalization → validation → decision`. Stages 2–6 are
-complete for English-language PDF invoices.
+complete for English-language PDF invoices. Stage 7 adds the **human review**
+of a `NEEDS_REVIEW` decision — `APPROVE` / `REJECT` with an audit trail, moving
+the document to a terminal `APPROVED` / `REJECTED` status — and is complete
+(backend here; the reviewer UI is in `frontend/`). Field corrections and
+reprocessing are deferred to Stage 8.
 
 ## Requirements
 
@@ -586,6 +590,67 @@ side, no fields of its own:
   `.../validations/{vid}/decisions[...]`) are unchanged and remain the way to
   drive or inspect one stage in isolation.
 
+## Review API (Stage 7)
+
+Stage 7 records a **human resolution** of a `COMPLETED` decision whose
+`outcome` is `NEEDS_REVIEW`: `APPROVE` or `REJECT`, attributed and timestamped,
+with a note required on `REJECT` and optional on `APPROVE`. It re-computes
+nothing upstream, never mutates a Stage 2–6 row or the stored PDF, and cannot
+override a Stage 6 `ACCEPTED` result. It is database-only — no AI, no network.
+Full spec: [`../docs/stage-7-review.md`](../docs/stage-7-review.md).
+
+A review is a **single terminal event**, not an attempt: there is no
+`PROCESSING`/`FAILED` review row, no `attempt_number`, and no retry route. A
+technical submit failure persists nothing — the caller simply submits again; a
+successful review is terminal (no amend / re-open).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/reviews/queue` | documents awaiting review, oldest decision first (`limit` 1–200, `offset`) |
+| `GET`  | `/reviews/{review_id}` | one recorded resolution, with its `document_id` |
+| `POST` | `.../validations/{vid}/decisions/{decision_id}/review` | submit `APPROVE` / `REJECT` (`201`), move the document |
+| `GET`  | `.../validations/{vid}/decisions/{decision_id}/review` | the resolution for a decision, if any |
+
+**Request** (`ReviewSubmitRequest` — the internal `InvoiceReview` contract):
+`action` (`APPROVE` \| `REJECT`), `reviewer_name` (required, trimmed, 1–200
+chars — an explicitly **unverified** label, never an authenticated identity),
+`note` (required + non-blank for `REJECT`, optional for `APPROVE`). Empty or
+unknown-key body → `422`.
+
+**Response** (`InvoiceReviewResult`): `review_id`, `decision_id`,
+`document_id`, `action`, `reviewer_name`, `note`, `policy_version`,
+`reviewed_at`, `created_at`. `ReviewQueueEntry` additionally carries the chain
+ids and the ordered Stage 6 `decision` reasons (rebuilt, re-validated) so the
+queue shows why each invoice was flagged.
+
+- `404` per broken chain link (`DOCUMENT_NOT_FOUND` … `DECISION_NOT_FOUND`) or
+  `REVIEW_NOT_FOUND`. `409` `DECISION_NOT_REVIEWABLE` (not a `COMPLETED`
+  `NEEDS_REVIEW` decision, or a Stage 6 `ACCEPTED` result),
+  `DECISION_ALREADY_REVIEWED`, `STALE_DECISION_SOURCE` (the decision's chain
+  has been superseded).
+
+### Review lifecycle
+
+`ReviewService.submit` (`app/services/processing/review/`) locks the target
+`invoice_decisions` row *and* the owning `documents` row
+(`SELECT ... FOR UPDATE`), runs the `lifecycle.py` guards, re-checks the
+current chain, then writes the one `invoice_reviews` row and the document
+status in a single transaction:
+
+```text
+COMPLETED, NEEDS_REVIEW decision ─(APPROVE)─> documents.status  NEEDS_REVIEW ─> APPROVED
+                                ─(REJECT)──> documents.status  NEEDS_REVIEW ─> REJECTED
+```
+
+- `APPROVED` / `REJECTED` are new terminal `documents.status` values, reachable
+  **only** from `NEEDS_REVIEW` and **only** through Stage 7. `COMPLETED` keeps
+  its Stage 3 meaning (*extraction finished*). Migration `0006_review_tables`
+  rebuilds the `document_status` enum by rename-swap so the change round-trips.
+- One review per decision (`UNIQUE (invoice_reviews.decision_id)`); a
+  concurrent second submit that races past the lock is turned into a
+  `409 DECISION_ALREADY_REVIEWED`. Any other failure rolls back with nothing
+  written.
+
 ## Tests
 
 ```bash
@@ -641,6 +706,19 @@ decision run leaves every Stage 2–5 row and the stored PDF untouched and
 changes only `documents.status` (and only to `NEEDS_REVIEW`), and the
 decision-subsystem no-AI/no-network guards.
 
+`tests/test_stage7_verification.py` is the Stage 7 acceptance checklist (map in
+its docstring and in [`../docs/stage-7-review.md`](../docs/stage-7-review.md)
+"## Verification"). It drives upload → … → decision → review over real HTTP:
+authorization / ownership (`ACCEPTED` not overridable, 404 per broken chain
+link), queue behaviour (FIFO, reasons shown, resolved and `ACCEPTED` items
+absent), approve/reject and the required rejection note, duplicate and
+concurrent submissions, the stale-decision guard, audit retrieval and
+stability, and a byte-for-byte check that a review changes exactly
+`documents.status` (`NEEDS_REVIEW → APPROVED | REJECTED`) plus `updated_at` and
+nothing else on any Stage 2–6 row or the stored PDF, plus the review-subsystem
+no-AI/no-network guards. The `0006_review_tables` migration round trip lives in
+`tests/test_review_migration.py`.
+
 ## Layout
 
 ```text
@@ -658,6 +736,7 @@ app/
     normalization.py invoice_normalizations + normalized line items + field errors
     validation.py    invoice_validations + invoice_validation_findings tables
     decision.py      invoice_decisions + invoice_decision_reasons tables
+    review.py        invoice_reviews table (one terminal human resolution per decision)
   schemas/
     document.py                  DocumentRead - public metadata (no file_location / file_hash)
     extraction.py                internal invoice extraction contract ({value, confidence})
@@ -674,6 +753,9 @@ app/
     decision_catalogue.py        closed ReasonPolicy table - one entry per rule + manual review
     decision_persistence.py      InvoiceDecision <-> flat reason-row mapping
     decision_api.py              decision request + public response models
+    review.py                    internal review contract (action + unverified reviewer_name + note)
+    review_persistence.py        InvoiceReview <-> flat invoice_reviews-row mapping
+    review_api.py                review submit request + public response + queue-entry models
     pipeline_api.py              PipelineRunRequest + PipelineRunResult (all four stage results)
   services/
     pdf.py           inspect_pdf: signature + readability + page-count check
@@ -707,14 +789,19 @@ app/
         lifecycle.py       valid validation / decision-attempt transitions + document-status map
         repository.py      DecisionRepository - reads/writes the decision tables
         service.py         DecisionService - start / retry, PROCESSING -> COMPLETED|FAILED, writes documents.status
+      review/
+        lifecycle.py       reviewable-decision + stale-source guards (no attempt lifecycle)
+        repository.py      ReviewRepository - reads/writes invoice_reviews + the queue query
+        service.py         ReviewService.submit - lock decision + document, write review + documents.status
       pipeline.py       ProcessingPipeline - composes extraction -> normalization -> validation -> decision (no rules of its own)
   api/
-    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_validation_service, get_decision_service, get_pipeline)
+    deps.py          shared dependencies (get_db, get_storage, get_extraction_service, get_extractor, get_normalization_service, get_validation_service, get_decision_service, get_review_service, get_pipeline)
     documents.py     POST /documents, GET /documents[/{id}[/file]]
     extractions.py   POST/GET /documents/{id}/extractions[...]
     normalizations.py POST/GET /documents/{id}/extractions/{eid}/normalizations[...]
     validations.py   POST/GET /documents/{id}/extractions/{eid}/normalizations/{nid}/validations[...]
     decisions.py     POST/GET /documents/{id}/extractions/{eid}/normalizations/{nid}/validations/{vid}/decisions[...]
+    reviews.py       GET /reviews/queue, GET /reviews/{id}, POST/GET .../decisions/{did}/review
     pipeline.py      POST /documents/{id}/pipeline[/retry]
     health.py        health endpoints
     router.py        aggregate router

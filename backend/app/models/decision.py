@@ -81,6 +81,7 @@ from app.schemas.normalization import (
 )
 
 if TYPE_CHECKING:
+    from app.models.review import ReviewRecord
     from app.models.validation import ValidationAttempt
 
 __all__ = [
@@ -221,6 +222,15 @@ class DecisionAttempt(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="DecisionReasonRow.position",
+    )
+    # Stage 7 human resolution of this decision, if one has been recorded.
+    # One-to-one (a unique constraint on invoice_reviews.decision_id
+    # enforces it). Added in Stage 7; does not affect any Stage 6 behaviour.
+    review: Mapped["ReviewRecord | None"] = relationship(
+        back_populates="source_decision",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

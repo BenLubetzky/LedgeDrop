@@ -24,9 +24,11 @@ if TYPE_CHECKING:
 class DocumentStatus(str, enum.Enum):
     """Lifecycle states for a document.
 
-    Only :attr:`UPLOADED` is reachable in Stage 2. The later states are defined
-    now so the column type is stable, but nothing transitions a document into
-    them until a real processor exists.
+    Only :attr:`UPLOADED` is reachable in Stage 2. Extraction (Stage 3) drives
+    ``PROCESSING`` / ``COMPLETED`` / ``FAILED``; the Stage 6 decision sets
+    ``NEEDS_REVIEW``; the Stage 7 human review sets the terminal ``APPROVED`` /
+    ``REJECTED``, reachable only from ``NEEDS_REVIEW``. ``COMPLETED`` keeps its
+    Stage 3 meaning throughout - *extraction finished*, not *business accepted*.
     """
 
     UPLOADED = "UPLOADED"
@@ -34,6 +36,10 @@ class DocumentStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
+    # Stage 7 terminal outcomes. Reachable only from NEEDS_REVIEW, only through
+    # the human-review workflow; nothing transitions a document out of them.
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
 
 
 def _utcnow() -> datetime:

@@ -14,6 +14,7 @@ from app.models.normalization import (
     NormalizationLineItem,
     NormalizationStatus,
 )
+from app.models.review import ReviewAction, ReviewRecord
 from app.models.validation import (
     FindingSeverity,
     ValidationAttempt,
@@ -43,4 +44,6 @@ __all__ = [
     "DecisionReasonCode",
     "DecisionReasonRow",
     "DecisionStatus",
+    "ReviewAction",
+    "ReviewRecord",
 ]

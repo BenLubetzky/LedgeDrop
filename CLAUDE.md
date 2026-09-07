@@ -77,112 +77,77 @@ callable via its own endpoints.
 **Status: complete — all 6 packages done.** Stage 6 consumes persisted
 processing results and determines whether an invoice can be accepted or needs
 human review. Full boundary, policy (including the complete 15-rule → decision-reason
-mapping), contract, persistence design, engine design, and lifecycle/document-
-status design are in `docs/stage-6-decision.md`. Package 1 code:
-`backend/app/schemas/decision.py` + `decision_catalogue.py` (with
-`backend/tests/test_decision_{contract,catalogue}.py`). Package 2 code:
-`backend/app/models/decision.py`, migration `0005_decision_tables`,
-`backend/app/schemas/decision_persistence.py`,
-`backend/app/services/processing/decision/repository.py` (with
-`backend/tests/test_decision_{model,persistence,repository}.py`); verified
-against real PostgreSQL (`alembic upgrade head -> downgrade -1 -> upgrade
-head -> check`, Stage 2–5 data preserved byte-for-byte). Package 3 code:
-`backend/app/services/processing/decision/engine.py` — a pure
-`decide(validation, *, manual_review_requested) -> InvoiceDecision`, no
-session/AI/network call, with `backend/tests/test_decision_engine.py`.
-Package 4 code: `backend/app/services/processing/decision/{lifecycle,
-service}.py` — `DecisionService` mirrors `ValidationService` (source lock,
-committed `PROCESSING`, generic `FAILED` on any technical fault, explicit
-retry, one active attempt per validation) and additionally locks and writes
-the owning `documents` row: `NEEDS_REVIEW` on that outcome, unchanged
-(`COMPLETED`) on `ACCEPTED` or on a technical decision failure, and a
-`STALE_VALIDATION_SOURCE` 409 if the validation is no longer the document's
-current extraction/normalization chain (not reachable via today's API, kept
-as a defensive guard) — with `backend/tests/test_decision_{lifecycle,
-service}.py`. Package 5 code: `backend/app/api/decisions.py` (scoped
-start/retry/list/latest/specific routes under
-`.../validations/{vid}/decisions`), `backend/app/schemas/decision_api.py`
-(`DecisionStartRequest` with a strict `manual_review_requested` bool;
-`InvoiceDecisionResult` whose `data` is the `InvoiceDecision` only on a
-`COMPLETED` attempt, `null` while `PROCESSING`/`FAILED`), `get_decision_service`
-in `backend/app/api/deps.py`, `manual_review_requested` threaded through
-`DecisionService.start`/`retry`, and a fourth pipeline stage
-(`ProcessingPipeline._continue_to_decision`, `PipelineRunResult.decision`,
-`PipelineRunRequest.manual_review_requested`) that runs the decision only on a
-`COMPLETED` validation and leaves `decision=null` otherwise — with
-`backend/tests/test_decisions_api.py` and additions to
-`backend/tests/test_pipeline{,_api}.py`. Package 6 code:
-`backend/tests/test_stage6_verification.py` — one executable pass over the
-Stage 6 acceptance checklist through the composed stack (clean acceptance,
-every review trigger incl. the `high_value_invoice` elevation, the all-`null`
-confidence GPT-5-mini shape still accepting, manual review, upstream/technical
-failures, retries, HTTP-level concurrency, and the stale-source guard), plus
-the `0005_decision_tables` migration round trip, byte-for-byte source
-immutability with only `documents.status` changing (and only to
-`NEEDS_REVIEW`), and the decision-subsystem "no AI / no network" guards. Full
-checklist → coverage map and the run result are in
-`docs/stage-6-decision.md` "## Verification". The six-package plan below is
-kept for history.
-
-1. **Boundary, decision policy, and contracts.** Write
-   `docs/stage-6-decision.md` before implementation. Define the input lineage,
-   outcome/reason enums, public result shape, and a complete mapping of all 15
-   Stage 5 rules to decision reasons and outcomes. Specify precedence when
-   multiple findings apply, clean-invoice acceptance, manual-review requests,
-   missing confidence, and failed/unusable upstream processing. Treat proposed
-   business policies as provisional until agreed; do not infer acceptance from
-   severity counts alone. In particular, GPT-5-mini supplies `null` confidence:
-   decide explicitly whether unavailable critical-field confidence requires
-   review, and never interpret it as high confidence. Reuse Stage 5 findings
-   and thresholds rather than recalculating validation. Define technical attempt
-   status separately from business outcome; automatic rejection and human
-   approval/rejection remain outside this stage. Add contract/policy tests.
-2. **Persistence, migration, and audit representation.** Add decision attempt
-   and reason models, persistence schemas, repository, and an Alembic migration
-   together. Preserve source attempt IDs, ordered reasons and their finding
-   references, timestamps, and the policy version needed to explain an outcome.
-   Decide how upstream failures without a completed validation are represented
-   without fabricating a successful validation. Preserve history, enforce one
-   active attempt per defined source, and verify migration upgrade/downgrade
-   and lossless result round trips on PostgreSQL.
-3. **Deterministic decision engine.** Implement the agreed mapping in
-   `backend/app/services/processing/decision/`, with centralized policy and a
-   pure evaluator. Produce stable outcomes and explainable reasons for clean
-   invoices, conflicting findings, duplicate/high-value flags, missing or low
-   confidence, manual review, and the agreed upstream-failure cases. No AI,
-   external calls, invented confidence, discarded values, or mutation of
-   extraction, normalization, or validation results. Test the full decision
-   matrix and determinism.
-4. **Lifecycle, orchestration, and document status.** Add service and lifecycle
-   guards together: source locking, committed processing attempt, atomic final
-   outcome/reasons, safe technical failure, explicit retry, concurrent-start
-   protection, and preserved history. Pin the document-status mapping in the
-   spec first: existing `COMPLETED` means extraction completion, not business
-   acceptance. Integrate `NEEDS_REVIEW` deliberately and prevent an old source
-   attempt from overwriting the current document outcome. Inspect extraction
-   start/retry guards for compatibility. A review outcome is a successful
-   decision, not a `FAILED` decision attempt. Test races, stale sources, retries,
-   rollback, and document transitions.
-5. **API and pipeline integration.** Add scoped start/retry/list/latest/specific
-   decision routes, dependency wiring, and safe response/error schemas as one
-   package. Extend the composed pipeline response with the decision result;
-   implement the agreed stop/escalation behavior for failed upstream stages.
-   Preserve independent stage endpoints and existing response fields. Keep
-   policy inside the decision subsystem. Define manual-review input and its
-   interaction with an existing outcome explicitly. Test ownership/lineage
-   checks, `404`/`409` behavior, failed attempts, and the complete pipeline.
-6. **End-to-end verification and documentation.** Verify clean acceptance,
-   each review trigger, multiple reasons, unavailable confidence with the real
-   provider's stored input shape, upstream failures, manual requests, retries,
-   concurrency, and stale-source protection. Prove earlier stage results and
-   original PDFs remain unchanged, and only the explicitly authorized document
-   status fields change. Run relevant backend regression checks and migration
-   checks; update this handoff, the stage spec, and READMEs with actual results.
+mapping), the persistence, engine, and lifecycle/document-status design, the
+full six-package implementation plan, and the verification map are all in
+`docs/stage-6-decision.md`. Code lives under
+`backend/app/services/processing/decision/` (`engine.py` is a pure
+`decide(validation, *, manual_review_requested) -> InvoiceDecision` with no
+session/AI/network call; `lifecycle.py`/`repository.py`/`service.py` mirror the
+Stage 5 shape and additionally lock and write the owning `documents` row),
+`backend/app/models/decision.py` (migration `0005_decision_tables`),
+`backend/app/schemas/decision*.py`, and `backend/app/api/decisions.py`
+(start/retry/list/latest/specific routes under
+`.../validations/{vid}/decisions`). `DecisionService` writes `NEEDS_REVIEW` on
+that outcome and leaves `documents.status` untouched on `ACCEPTED` or on a
+technical failure; a review outcome is a successful decision, not a `FAILED`
+attempt. GPT-5-mini's all-`null` per-field confidence is non-gating by pinned
+policy and is never read as high confidence. `manual_review_requested` is an
+add-only flag (on the decision routes and `POST /documents/{id}/pipeline`) that
+cannot revisit a `COMPLETED` decision. `ProcessingPipeline` runs the decision
+as a fourth stage only on a `COMPLETED` validation, leaving `decision=null`
+otherwise; each stage stays independently callable.
 
 **Scope limits:** backend decision/routing only. A review outcome prepares the
-later review workflow; it does not build review screens, editing, notifications,
-human approval/rejection, or downstream posting. Any read-only frontend work
-should be separately requested.
+Stage 7 review workflow; it does not build review screens, editing,
+notifications, human approval/rejection, or downstream posting. Any read-only
+frontend work should be separately requested.
+
+## Stage 7 (human review): complete
+
+**Status: complete — all 5 packages done.** Stage 7 records a human resolution
+of a `COMPLETED` Stage 6 decision whose outcome is `NEEDS_REVIEW`: `APPROVE` or
+`REJECT`, attributed and timestamped, moving the document to a new terminal
+`documents.status` (`APPROVED` / `REJECTED`, reachable only from `NEEDS_REVIEW`
+and only here — `COMPLETED` keeps its "extraction finished" meaning). It
+re-computes nothing upstream, never mutates a Stage 2–6 row or the stored PDF,
+cannot override a Stage 6 `ACCEPTED` result, and makes no AI or network call. A
+review is a **single terminal event** — no `PROCESSING`/`FAILED` row, no
+`attempt_number`, no retry route; a technical failure persists nothing (submit
+again), a success is terminal. Because LedgerDrop has no auth yet, the reviewer
+name is an explicitly *unverified* label. Pinned policy, contract, persistence,
+lifecycle/service/API and reviewer-UI design, and the verification map are in
+`docs/stage-7-review.md`.
+
+Backend code: `backend/app/schemas/review*.py`, `backend/app/models/review.py`
+(`ReviewRecord` / `invoice_reviews`, one row per decision, `UNIQUE(decision_id)`;
+migration `0006_review_tables` rebuilds the `document_status` enum by
+rename-swap so it round-trips), `backend/app/services/processing/review/`
+(`lifecycle.py` guards `DECISION_NOT_REVIEWABLE` / `DECISION_ALREADY_REVIEWED` /
+`STALE_DECISION_SOURCE`; `service.py` `ReviewService.submit` writes the review
+row + the document status in one transaction under a `SELECT ... FOR UPDATE` on
+the target `invoice_decisions` + `documents` rows),
+`backend/app/api/reviews.py` (`GET /reviews/queue` FIFO, `GET /reviews/{id}`,
+deep-nested `POST`/`GET .../decisions/{did}/review`), `get_review_service` in
+`deps.py`. Frontend: `frontend/src/app/review/` +
+`src/components/review-{queue,detail}.tsx` + shared `src/lib/{api,review-types}.ts`
+— the PDF beside a Field/Extracted/Normalized table, findings, decision reasons,
+and an approve/reject form, rendering only client-safe fields.
+`backend/tests/test_review_*.py`, `test_reviews_api.py`, and
+`test_stage7_verification.py` (16 tests); full backend suite green.
+`npm run lint` clean and `npx next build --webpack` compiles (Turbopack's
+native SWC binary is blocked by Smart App Control on this machine — same
+constraint as the Python toolchain).
+
+**Field corrections / reprocessing: explicitly deferred to Stage 8** (confirmed
+with the project owner). A Stage 7 reviewer only approves or rejects; a wrong
+value is a `REJECT` with a note. Stage 8 sketch (separate append-only
+corrections store never writing to Stage 2–6 rows, a `normalized ⊕ corrections`
+merge view for revalidation and re-decision, inline-edit UI) is in
+`docs/stage-7-review.md`.
+
+**Scope limits:** queue, inspect, approve/reject, and audit trail only.
+Corrections/reprocessing are Stage 8; notifications,
+authentication/organizations, and downstream posting remain later-stage work.
 
 ## Technology decisions
 
@@ -210,7 +175,8 @@ Browser -> Next.js frontend -> FastAPI document API
        |-- Extraction             <- Stage 3 (done)
        |-- Normalization          <- Stage 4 (done)
        |-- Validation             <- Stage 5 (done)
-       `-- Decision / escalation  <- Stage 6 (done)
+       |-- Decision / escalation  <- Stage 6 (done)
+       `-- Human review           <- Stage 7 (done)
 ```
 
 Extraction and normalization are separate backend subsystems. Provider-specific
@@ -334,7 +300,11 @@ stage's scope:
 
 - Discarding uncertain fields (Stage 5 confidence findings are implemented)
 - Defaulting missing currency or converting currencies
-- Human-review screens, editing, approval, or rejection
+- Editing reviewed fields or creating corrected canonical invoice values
+  (**Stage 8** — explicitly deferred; a Stage 7 reviewer only approves or
+  rejects; sketch in `docs/stage-7-review.md`)
+- Reprocessing / revalidation / re-decision after a reviewer correction (Stage 8)
+- Reviewer notifications or assignment workflows beyond the Stage 7 MVP queue
 - Downstream business-database integration
 - Authentication, organizations, or multi-tenancy
 - Production object storage or deployment infrastructure
@@ -343,7 +313,9 @@ stage's scope:
 
 Deterministic validation, reconciliation, confidence checks, and duplicate /
 high-value findings are already implemented in Stage 5. Decision and escalation
-work, including `NEEDS_REVIEW`, belongs to the Stage 6 plan above.
+work, including `NEEDS_REVIEW`, is implemented in Stage 6. The queue, read-only
+review view, human approval/rejection, and audit trail belong to the planned
+Stage 7 scope above.
 
 ## Implementation conduct
 
