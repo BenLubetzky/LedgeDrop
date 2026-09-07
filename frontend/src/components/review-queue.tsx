@@ -48,6 +48,9 @@ export function ReviewQueue() {
       </header>
 
       <div className="review-page">
+        <Link className="back-link" href="/">
+          &larr; Back to uploads
+        </Link>
         <section className="section-heading review-heading">
           <div>
             <p className="eyebrow">Human review</p>

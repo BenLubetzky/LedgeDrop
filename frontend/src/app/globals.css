@@ -484,6 +484,7 @@ svg {
 }
 .back-link { display: inline-flex; align-items: center; }
 .back-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.review-page > .back-link { margin-bottom: 18px; }
 
 .queue-list { list-style: none; }
 .queue-card {

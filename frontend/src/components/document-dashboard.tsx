@@ -20,7 +20,9 @@ type DocumentStatus =
   | "PROCESSING"
   | "COMPLETED"
   | "NEEDS_REVIEW"
-  | "FAILED";
+  | "FAILED"
+  | "APPROVED"
+  | "REJECTED";
 
 type DocumentRecord = {
   document_id: string;
@@ -70,6 +72,20 @@ type ExtractionResult = {
   failure_code: string | null;
   failure_message: string | null;
   data: ExtractionData;
+};
+
+type PipelineStageResult = {
+  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  failure_message: string | null;
+};
+
+type PipelineResult = {
+  extraction: ExtractionResult;
+  normalization: PipelineStageResult | null;
+  validation: PipelineStageResult | null;
+  decision: (PipelineStageResult & {
+    outcome: "ACCEPTED" | "NEEDS_REVIEW" | null;
+  }) | null;
 };
 
 const EXTRACTION_FIELDS: Array<[keyof Omit<ExtractionData, "line_items">, string]> = [
@@ -349,7 +365,7 @@ export function DocumentDashboard() {
     }
   };
 
-  const runExtraction = async (document: DocumentRecord) => {
+  const runPipeline = async (document: DocumentRecord) => {
     const isRetry = document.status === "FAILED";
     setExtractingDocumentId(document.document_id);
     setUploadError(null);
@@ -365,32 +381,46 @@ export function DocumentDashboard() {
     try {
       const suffix = isRetry ? "/retry" : "";
       const response = await fetch(
-        `${API_BASE_URL}/documents/${document.document_id}/extractions${suffix}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        `${API_BASE_URL}/documents/${document.document_id}/pipeline${suffix}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ manual_review_requested: false }),
+        },
       );
       const body = await readJson(response);
       if (!response.ok) {
-        throw new Error(messageFromBody(body, "The extraction could not be started."));
+        throw new Error(messageFromBody(body, "The processing pipeline could not be started."));
       }
 
-      const result = body as ExtractionResult;
-      setDocuments((current) =>
-        current.map((item) =>
-          item.document_id === document.document_id
-            ? { ...item, status: result.status }
-            : item,
-        ),
-      );
-      if (result.status === "COMPLETED") {
+      const result = body as PipelineResult;
+      const failedStage = [
+        result.extraction,
+        result.normalization,
+        result.validation,
+        result.decision,
+      ].find((stage) => stage?.status === "FAILED");
+
+      if (result.extraction.status === "COMPLETED") {
         setSelectedDocumentName(document.original_filename);
-        setSelectedExtraction(result);
-        setSuccessMessage(`${document.original_filename} was extracted successfully.`);
-      } else if (result.status === "FAILED") {
-        setUploadError(result.failure_message ?? "The extraction failed. You can retry it.");
+        setSelectedExtraction(result.extraction);
       }
+
+      if (failedStage) {
+        setUploadError(
+          failedStage.failure_message ?? "Processing failed before a decision was reached.",
+        );
+      } else if (result.decision?.outcome === "NEEDS_REVIEW") {
+        setSuccessMessage(`${document.original_filename} was sent to the review queue.`);
+      } else if (result.decision?.outcome === "ACCEPTED") {
+        setSuccessMessage(`${document.original_filename} was processed and accepted.`);
+      } else {
+        setUploadError("Processing stopped before a business decision was reached.");
+      }
+      await loadDocuments();
     } catch (error) {
       await loadDocuments();
-      setUploadError(errorMessage(error, "The extraction could not be started."));
+      setUploadError(errorMessage(error, "The processing pipeline could not be started."));
     } finally {
       setExtractingDocumentId(null);
     }
@@ -537,7 +567,7 @@ export function DocumentDashboard() {
                     <span className={`status status-${document.status.toLowerCase()}`}>
                       {document.status.replace("_", " ")}
                     </span>
-                    {document.status === "COMPLETED" ? (
+                    {["COMPLETED", "NEEDS_REVIEW", "APPROVED", "REJECTED"].includes(document.status) ? (
                       <button
                         className="extraction-button"
                         type="button"
@@ -550,17 +580,17 @@ export function DocumentDashboard() {
                       <button
                         className="extraction-button"
                         type="button"
-                        onClick={() => void runExtraction(document)}
+                        onClick={() => void runPipeline(document)}
                         disabled={
                           document.status === "PROCESSING" ||
                           extractingDocumentId === document.document_id
                         }
                       >
                         {document.status === "PROCESSING" || extractingDocumentId === document.document_id
-                          ? "Extracting…"
+                          ? "Processing…"
                           : document.status === "FAILED"
-                            ? "Retry extraction"
-                            : "Extract"}
+                            ? "Retry processing"
+                            : "Process"}
                       </button>
                     )}
                   </span>

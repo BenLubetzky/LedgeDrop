@@ -15,6 +15,7 @@ any response.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Sequence
 from functools import partial
@@ -41,6 +42,7 @@ from app.services.pdf import NOT_A_PDF, PdfValidationError, inspect_pdf
 from app.services.storage import LocalFileStorage, StorageError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+logger = logging.getLogger("app.documents")
 
 _READ_CHUNK = 1024 * 1024  # 1 MiB
 _MAX_ORIGINAL_FILENAME_LENGTH = 512
@@ -187,7 +189,16 @@ async def delete_document(
     # leave a live document record pointing at a file that no longer exists.
     await db.delete(document)
     await db.commit()
-    await storage.delete(document_id)
+    try:
+        await storage.delete(document_id)
+    except Exception:
+        # The database record and every dependent processing/review row have
+        # already been removed. A best-effort filesystem cleanup failure must
+        # not make the client believe the document deletion itself failed.
+        logger.exception(
+            "Document %s was deleted from the database, but stored-file cleanup failed",
+            document_id,
+        )
 
 
 @router.get(

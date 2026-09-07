@@ -288,10 +288,14 @@ class DecisionReasonRow(Base):
     # finding's full expected/actual/context stays reachable without being
     # duplicated here. NULL only for manual_review_requested. The default
     # NO ACTION delete behavior protects the audit trail from an independent
-    # finding deletion; deleting the owning validation/document still removes
-    # the complete decision branch through its own CASCADE.
+    # finding deletion. Deferring the check until commit also lets a document
+    # delete's validation-finding and decision-reason CASCADE branches settle.
     source_finding_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("invoice_validation_findings.validation_finding_id"),
+        ForeignKey(
+            "invoice_validation_findings.validation_finding_id",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
         nullable=True,
     )
 
