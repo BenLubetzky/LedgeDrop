@@ -170,7 +170,7 @@ async def get_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Document:
     return await _get_or_404(db, document_id)
-
+6
 
 @router.delete(
     "/{document_id}",

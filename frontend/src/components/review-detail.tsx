@@ -1,13 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import {
   API_BASE_URL,
   codeFromBody,
   errorMessage,
-  formatConfidence,
   formatDateTime,
   getJson,
   messageFromBody,
@@ -19,6 +18,7 @@ import {
   type DecisionResult,
   type DocumentRecord,
   type ExtractionResult,
+  type NormalizedData,
   type NormalizationResult,
   type ValidationResult,
 } from "@/lib/review-types";
@@ -32,6 +32,42 @@ type Chain = {
 };
 
 type Resolved = { action: "APPROVE" | "REJECT"; reviewer: string };
+type CorrectionResult = {
+  extraction: ExtractionResult;
+  normalization: NormalizationResult;
+  validation: ValidationResult;
+  decision: DecisionResult;
+  approved: boolean;
+};
+type ScalarKey = keyof Omit<NormalizedData, "line_items" | "errors">;
+type EditableLineItem = NormalizedData["line_items"][number];
+type InvoiceDraft = Record<ScalarKey, string> & { line_items: EditableLineItem[] };
+
+function invoiceDraftFromChain(chain: Chain): InvoiceDraft {
+  const scalar = Object.fromEntries(
+    SCALAR_FIELDS.map(([key]) => [
+      key,
+      chain.normalization.data[key] ?? chain.extraction.data[key].value ?? "",
+    ]),
+  ) as Record<ScalarKey, string>;
+  const lineCount = Math.max(
+    chain.extraction.data.line_items.length,
+    chain.normalization.data.line_items.length,
+  );
+  return {
+    ...scalar,
+    line_items: Array.from({ length: lineCount }, (_, index) => {
+      const normalized = chain.normalization.data.line_items[index];
+      const extracted = chain.extraction.data.line_items[index];
+      return {
+        description: normalized?.description ?? extracted?.description.value ?? "",
+        quantity: normalized?.quantity ?? extracted?.quantity.value ?? "",
+        unit_price: normalized?.unit_price ?? extracted?.unit_price.value ?? "",
+        line_total: normalized?.line_total ?? extracted?.line_total.value ?? "",
+      };
+    }),
+  };
+}
 
 function humanize(code: string | null): string | null {
   if (!code) return null;
@@ -59,6 +95,7 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [resolved, setResolved] = useState<Resolved | null>(null);
+  const [invoiceDraft, setInvoiceDraft] = useState<InvoiceDraft | null>(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -88,13 +125,15 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
           `/normalizations/${normalization.normalization_id}` +
           `/validations/${validation.validation_id}/decisions/latest`,
       );
-      setChain({
+      const loadedChain = {
         document: doc,
         extraction,
         normalization,
         validation,
         decision,
-      });
+      };
+      setChain(loadedChain);
+      setInvoiceDraft(invoiceDraftFromChain(loadedChain));
     } catch (err) {
       setLoadError(errorMessage(err, "This invoice could not be loaded."));
     } finally {
@@ -107,22 +146,14 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
     return () => window.clearTimeout(initial);
   }, [load]);
 
-  const errorsByPath = useMemo(() => {
-    const map = new Map<string, string>();
-    chain?.normalization.data.errors.forEach((e) =>
-      map.set(e.field_path, e.message),
-    );
-    return map;
-  }, [chain]);
-
   const trimmedReviewer = reviewer.trim();
   const trimmedNote = note.trim();
 
   async function submit(chosen: "APPROVE" | "REJECT") {
-    if (!chain || isSubmitting) return;
+    if (!chain || !invoiceDraft || isSubmitting) return;
     if (trimmedReviewer.length === 0) return;
     if (chosen === "REJECT" && trimmedNote.length === 0) return;
-    const verb = chosen === "APPROVE" ? "approve" : "reject";
+    const verb = chosen === "APPROVE" ? "validate and approve" : "reject";
     if (
       !window.confirm(
         `Are you sure you want to ${verb} this invoice? This decision is final.`,
@@ -140,6 +171,45 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
       `/validations/${validation.validation_id}` +
       `/decisions/${decision.decision_id}/review`;
     try {
+      if (chosen === "APPROVE") {
+        const response = await fetch(
+          `${API_BASE_URL}/documents/${documentId}/corrections`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source_decision_id: decision.decision_id,
+              reviewer_name: trimmedReviewer,
+              note: trimmedNote.length > 0 ? trimmedNote : null,
+              ...invoiceDraft,
+            }),
+          },
+        );
+        const body = await readJson(response);
+        if (!response.ok) {
+          throw new Error(
+            messageFromBody(body, "The corrected invoice could not be validated."),
+          );
+        }
+        const corrected = body as CorrectionResult;
+        if (corrected.approved) {
+          setResolved({ action: chosen, reviewer: trimmedReviewer });
+        } else {
+          const correctedChain: Chain = {
+            document: chain.document,
+            extraction: corrected.extraction,
+            normalization: corrected.normalization,
+            validation: corrected.validation,
+            decision: corrected.decision,
+          };
+          setChain(correctedChain);
+          setInvoiceDraft(invoiceDraftFromChain(correctedChain));
+          setSubmitError(
+            "The corrected invoice still needs review. Fix the remaining validation findings and try again.",
+          );
+        }
+        return;
+      }
       const response = await fetch(`${API_BASE_URL}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -225,6 +295,81 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
               </p>
             </header>
 
+            {invoiceDraft && (
+              <section className="invoice-editor" aria-labelledby="invoice-editor-title">
+                <div className="editor-heading">
+                  <div>
+                    <p className="eyebrow">Extracted data</p>
+                    <h2 id="invoice-editor-title">Review and correct fields</h2>
+                  </div>
+                  <span className="draft-badge">Draft</span>
+                </div>
+                <p className="editor-intro">
+                  Compare these values with the original PDF and correct anything
+                  the extractor missed. Corrections are saved when you validate
+                  and approve.
+                </p>
+                <div className="invoice-field-grid">
+                  {SCALAR_FIELDS.map(([key, label]) => (
+                    <label className="editor-field" key={key}>
+                      <span>{label}</span>
+                      <input
+                        className="text-input"
+                        value={invoiceDraft[key]}
+                        onChange={(event) =>
+                          setInvoiceDraft((current) =>
+                            current
+                              ? { ...current, [key]: event.target.value }
+                              : current,
+                          )
+                        }
+                        placeholder={`Enter ${label.toLowerCase()}`}
+                      />
+                    </label>
+                  ))}
+                </div>
+
+                <div className="editor-lines-head">
+                  <h3>Line items</h3>
+                  <span>{invoiceDraft.line_items.length}</span>
+                </div>
+                <div className="line-editor-list">
+                  {invoiceDraft.line_items.map((line, index) => (
+                    <fieldset className="line-editor" key={index}>
+                      <legend>Line {index + 1}</legend>
+                      {(
+                        [
+                          ["description", "Description"],
+                          ["quantity", "Quantity"],
+                          ["unit_price", "Unit price"],
+                          ["line_total", "Line total"],
+                        ] as const
+                      ).map(([field, label]) => (
+                        <label className={`editor-field line-${field}`} key={field}>
+                          <span>{label}</span>
+                          <input
+                            className="text-input"
+                            value={line[field] ?? ""}
+                            onChange={(event) =>
+                              setInvoiceDraft((current) => {
+                                if (!current) return current;
+                                const lineItems = [...current.line_items];
+                                lineItems[index] = {
+                                  ...lineItems[index],
+                                  [field]: event.target.value,
+                                };
+                                return { ...current, line_items: lineItems };
+                              })
+                            }
+                          />
+                        </label>
+                      ))}
+                    </fieldset>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {resolved ? (
               <div
                 className={`resolution-banner is-${resolved.action.toLowerCase()}`}
@@ -289,8 +434,8 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
                     disabled={isSubmitting || trimmedReviewer.length === 0}
                   >
                     {isSubmitting && action === "APPROVE"
-                      ? "Approving…"
-                      : "Approve"}
+                      ? "Validating…"
+                      : "Validate & approve"}
                   </button>
                   <button
                     type="button"
@@ -308,7 +453,8 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
                   </button>
                 </div>
                 <p className="decision-hint">
-                  A decision is final and moves the invoice out of the queue.
+                  Approval saves these corrections, then runs normalization and
+                  validation. The invoice is approved only if it passes.
                 </p>
               </form>
             )}
@@ -391,124 +537,6 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
               )}
             </section>
 
-            <section className="detail-section">
-              <h2>Invoice fields</h2>
-              <div className="values-table-wrap">
-                <table className="values-table">
-                  <thead>
-                    <tr>
-                      <th>Field</th>
-                      <th>Extracted</th>
-                      <th>Normalized</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {SCALAR_FIELDS.map(([key, label]) => {
-                      const extracted = chain.extraction.data[key];
-                      const normalized = chain.normalization.data[key];
-                      const fieldError = errorsByPath.get(key);
-                      const confidence = formatConfidence(extracted.confidence);
-                      return (
-                        <tr key={key}>
-                          <th scope="row">{label}</th>
-                          <td>
-                            {extracted.value ?? <span className="muted">—</span>}
-                            {confidence && (
-                              <span className="cell-hint">{confidence}</span>
-                            )}
-                          </td>
-                          <td>
-                            {fieldError ? (
-                              <span className="cell-error">{fieldError}</span>
-                            ) : (
-                              normalized ?? <span className="muted">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-            <section className="detail-section">
-              <h2>
-                Line items{" "}
-                <span className="count-pill">
-                  {Math.max(
-                    chain.extraction.data.line_items.length,
-                    chain.normalization.data.line_items.length,
-                  )}
-                </span>
-              </h2>
-              {Math.max(
-                chain.extraction.data.line_items.length,
-                chain.normalization.data.line_items.length,
-              ) > 0 ? (
-                <div className="values-table-wrap">
-                  <table className="values-table line-table">
-                    <thead>
-                      <tr>
-                        <th>Line / source</th>
-                        <th>Description</th>
-                        <th>Qty</th>
-                        <th>Unit price</th>
-                        <th>Line total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Array.from({
-                        length: Math.max(
-                          chain.extraction.data.line_items.length,
-                          chain.normalization.data.line_items.length,
-                        ),
-                      }).flatMap((_, index) => {
-                        const extracted = chain.extraction.data.line_items[index];
-                        const normalized = chain.normalization.data.line_items[index];
-                        const fields = [
-                          "description",
-                          "quantity",
-                          "unit_price",
-                          "line_total",
-                        ] as const;
-                        return [
-                          <tr key={`${index}-extracted`}>
-                            <th scope="row">Line {index + 1} · Extracted</th>
-                            {fields.map((field) => {
-                              const value = extracted?.[field];
-                              const confidence = value
-                                ? formatConfidence(value.confidence)
-                                : null;
-                              return (
-                                <td key={field}>
-                                  {value?.value ?? <span className="muted">—</span>}
-                                  {confidence && (
-                                    <span className="cell-hint">{confidence}</span>
-                                  )}
-                                </td>
-                              );
-                            })}
-                          </tr>,
-                          <tr key={`${index}-normalized`}>
-                            <th scope="row">Line {index + 1} · Normalized</th>
-                            {fields.map((field) => (
-                              <td key={field}>
-                                {normalized?.[field] ?? (
-                                  <span className="muted">—</span>
-                                )}
-                              </td>
-                            ))}
-                          </tr>,
-                        ];
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="muted">No line items.</p>
-              )}
-            </section>
           </section>
         </div>
       )}
