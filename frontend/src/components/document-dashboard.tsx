@@ -88,6 +88,16 @@ type PipelineResult = {
   }) | null;
 };
 
+type CorrectionResult = PipelineResult & { approved: boolean };
+
+function cloneExtractionData(data: ExtractionData): ExtractionData {
+  return structuredClone(data);
+}
+
+function emptyExtractedField(): ExtractedField {
+  return { value: null, confidence: null };
+}
+
 const EXTRACTION_FIELDS: Array<[keyof Omit<ExtractionData, "line_items">, string]> = [
   ["invoice_number", "Invoice number"],
   ["invoice_date", "Invoice date"],
@@ -236,6 +246,90 @@ export function DocumentDashboard() {
   const [extractingDocumentId, setExtractingDocumentId] = useState<string | null>(null);
   const [selectedExtraction, setSelectedExtraction] = useState<ExtractionResult | null>(null);
   const [selectedDocumentName, setSelectedDocumentName] = useState<string | null>(null);
+  const [extractionDraft, setExtractionDraft] = useState<ExtractionData | null>(null);
+  const [isEditingExtraction, setIsEditingExtraction] = useState(false);
+  const [showUnsavedDialog, setShowUnsavedDialog] = useState(false);
+  const [isSavingExtraction, setIsSavingExtraction] = useState(false);
+
+  const hasUnsavedExtractionChanges = Boolean(
+    selectedExtraction &&
+      extractionDraft &&
+      JSON.stringify(selectedExtraction.data) !== JSON.stringify(extractionDraft),
+  );
+
+  const closeExtraction = () => {
+    if (isEditingExtraction && hasUnsavedExtractionChanges) {
+      setShowUnsavedDialog(true);
+      return;
+    }
+    setSelectedExtraction(null);
+    setExtractionDraft(null);
+    setIsEditingExtraction(false);
+  };
+
+  const saveExtractionDraft = async (closeAfterSave = false) => {
+    if (!selectedExtraction || !extractionDraft) return;
+    setIsSavingExtraction(true);
+    setUploadError(null);
+    try {
+      const scalarValues = Object.fromEntries(
+        EXTRACTION_FIELDS.map(([key]) => [key, extractionDraft[key].value]),
+      );
+      const response = await fetch(
+        `${API_BASE_URL}/documents/${selectedExtraction.document_id}/corrections`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_extraction_id: selectedExtraction.extraction_id,
+            ...scalarValues,
+            line_items: extractionDraft.line_items.map((item) => ({
+              description: item.description.value,
+              quantity: item.quantity.value,
+              unit_price: item.unit_price.value,
+              line_total: item.line_total.value,
+            })),
+          }),
+        },
+      );
+      const body = await readJson(response);
+      if (!response.ok) {
+        throw new Error(messageFromBody(body, "The changes could not be validated."));
+      }
+      const corrected = body as CorrectionResult;
+      setSelectedExtraction(corrected.extraction);
+      setExtractionDraft(cloneExtractionData(corrected.extraction.data));
+      setIsEditingExtraction(false);
+      setShowUnsavedDialog(false);
+      setSuccessMessage(
+        corrected.approved
+          ? "Changes were validated and saved."
+          : "Changes were saved, but validation moved this invoice to review.",
+      );
+      await loadDocuments();
+      if (closeAfterSave) {
+        setSelectedExtraction(null);
+        setExtractionDraft(null);
+      }
+    } catch (error) {
+      setShowUnsavedDialog(false);
+      setUploadError(errorMessage(error, "The changes could not be validated."));
+    } finally {
+      setIsSavingExtraction(false);
+    }
+  };
+
+  const discardExtractionDraft = (closePanel = false) => {
+    if (selectedExtraction) {
+      setExtractionDraft(cloneExtractionData(selectedExtraction.data));
+    }
+    setIsEditingExtraction(false);
+    setShowUnsavedDialog(false);
+    if (closePanel) {
+      setSelectedExtraction(null);
+      setExtractionDraft(null);
+    }
+  };
 
   const loadDocuments = useCallback(async () => {
     setListError(null);
@@ -357,7 +451,10 @@ export function DocumentDashboard() {
         throw new Error(messageFromBody(body, "The extraction could not be loaded."));
       }
       setSelectedDocumentName(document.original_filename);
-      setSelectedExtraction(body as ExtractionResult);
+      const extraction = body as ExtractionResult;
+      setSelectedExtraction(extraction);
+      setExtractionDraft(cloneExtractionData(extraction.data));
+      setIsEditingExtraction(false);
     } catch (error) {
       setUploadError(errorMessage(error, "The extraction could not be loaded."));
     } finally {
@@ -404,6 +501,8 @@ export function DocumentDashboard() {
       if (result.extraction.status === "COMPLETED") {
         setSelectedDocumentName(document.original_filename);
         setSelectedExtraction(result.extraction);
+        setExtractionDraft(cloneExtractionData(result.extraction.data));
+        setIsEditingExtraction(false);
       }
 
       if (failedStage) {
@@ -659,7 +758,7 @@ export function DocumentDashboard() {
           className="extraction-backdrop"
           role="presentation"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSelectedExtraction(null);
+            if (event.target === event.currentTarget) closeExtraction();
           }}
         >
           <section
@@ -673,24 +772,74 @@ export function DocumentDashboard() {
                 <p className="eyebrow">Extracted invoice</p>
                 <h2 id="extraction-title">{selectedDocumentName}</h2>
               </div>
-              <button
-                className="panel-close"
-                type="button"
-                onClick={() => setSelectedExtraction(null)}
-                aria-label="Close extraction details"
-              >
-                Close
-              </button>
+              <div className="panel-actions">
+                {isEditingExtraction ? (
+                  <>
+                    <button
+                      className="panel-edit panel-save"
+                      type="button"
+                      onClick={() => void saveExtractionDraft()}
+                      disabled={!hasUnsavedExtractionChanges || isSavingExtraction}
+                    >
+                      {isSavingExtraction ? "Validating…" : "Save changes"}
+                    </button>
+                    <button
+                      className="panel-edit"
+                      type="button"
+                      onClick={() => discardExtractionDraft()}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="panel-edit panel-edit-trigger"
+                    type="button"
+                    onClick={() => setIsEditingExtraction(true)}
+                  >
+                    Edit
+                  </button>
+                )}
+                <button
+                  className="panel-close"
+                  type="button"
+                  onClick={closeExtraction}
+                  aria-label="Close extraction details"
+                >
+                  Close
+                </button>
+              </div>
             </header>
 
             <div className="extraction-fields">
               {EXTRACTION_FIELDS.map(([key, label]) => {
-                const field = selectedExtraction.data[key];
+                const field = (extractionDraft ?? selectedExtraction.data)[key];
                 return (
                   <div className="extraction-field" key={key}>
                     <span>{label}</span>
-                    <strong>{field.value ?? "Not found"}</strong>
-                    {field.confidence !== null && (
+                    {isEditingExtraction ? (
+                      <input
+                        className="extraction-input"
+                        value={field.value ?? ""}
+                        placeholder={`Enter ${label.toLowerCase()}`}
+                        onChange={(event) =>
+                          setExtractionDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  [key]: {
+                                    ...current[key],
+                                    value: event.target.value || null,
+                                  },
+                                }
+                              : current,
+                          )
+                        }
+                      />
+                    ) : (
+                      <strong>{field.value ?? "Not found"}</strong>
+                    )}
+                    {!isEditingExtraction && field.confidence !== null && (
                       <small>{formatConfidence(field.confidence)}</small>
                     )}
                   </div>
@@ -701,9 +850,37 @@ export function DocumentDashboard() {
             <div className="line-items-section">
               <div className="line-items-heading">
                 <h3>Line items</h3>
-                <span>{selectedExtraction.data.line_items.length} items</span>
+                <div className="line-heading-actions">
+                  <span>{(extractionDraft ?? selectedExtraction.data).line_items.length} items</span>
+                  {isEditingExtraction && (
+                    <button
+                      className="add-line-button"
+                      type="button"
+                      onClick={() =>
+                        setExtractionDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                line_items: [
+                                  ...current.line_items,
+                                  {
+                                    description: emptyExtractedField(),
+                                    quantity: emptyExtractedField(),
+                                    unit_price: emptyExtractedField(),
+                                    line_total: emptyExtractedField(),
+                                  },
+                                ],
+                              }
+                            : current,
+                        )
+                      }
+                    >
+                      + Add line
+                    </button>
+                  )}
+                </div>
               </div>
-              {selectedExtraction.data.line_items.length === 0 ? (
+              {(extractionDraft ?? selectedExtraction.data).line_items.length === 0 ? (
                 <p className="no-line-items">No line items were found.</p>
               ) : (
                 <div className="line-items-table-wrap">
@@ -712,12 +889,34 @@ export function DocumentDashboard() {
                       <tr><th>Description</th><th>Quantity</th><th>Unit price</th><th>Total</th></tr>
                     </thead>
                     <tbody>
-                      {selectedExtraction.data.line_items.map((item, index) => (
+                      {(extractionDraft ?? selectedExtraction.data).line_items.map((item, index) => (
                         <tr key={`${selectedExtraction.extraction_id}-${index}`}>
-                          <td>{item.description.value ?? "—"}</td>
-                          <td>{item.quantity.value ?? "—"}</td>
-                          <td>{item.unit_price.value ?? "—"}</td>
-                          <td>{item.line_total.value ?? "—"}</td>
+                          {(["description", "quantity", "unit_price", "line_total"] as const).map((field) => (
+                            <td key={field}>
+                              {isEditingExtraction ? (
+                                <input
+                                  className="line-item-input"
+                                  value={item[field].value ?? ""}
+                                  onChange={(event) =>
+                                    setExtractionDraft((current) => {
+                                      if (!current) return current;
+                                      const lineItems = [...current.line_items];
+                                      lineItems[index] = {
+                                        ...lineItems[index],
+                                        [field]: {
+                                          ...lineItems[index][field],
+                                          value: event.target.value || null,
+                                        },
+                                      };
+                                      return { ...current, line_items: lineItems };
+                                    })
+                                  }
+                                />
+                              ) : (
+                                item[field].value ?? "—"
+                              )}
+                            </td>
+                          ))}
                         </tr>
                       ))}
                     </tbody>
@@ -726,6 +925,31 @@ export function DocumentDashboard() {
               )}
             </div>
           </section>
+          {showUnsavedDialog && (
+            <div className="unsaved-backdrop" role="presentation">
+              <section
+                className="unsaved-dialog"
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="unsaved-title"
+              >
+                <p className="eyebrow">Unsaved changes</p>
+                <h3 id="unsaved-title">Save before closing?</h3>
+                <p>Your edits only exist in this browser and will be lost if you discard them.</p>
+                <div className="unsaved-actions">
+                  <button type="button" className="dialog-save" onClick={() => void saveExtractionDraft(true)} disabled={isSavingExtraction}>
+                    {isSavingExtraction ? "Validating…" : "Save & close"}
+                  </button>
+                  <button type="button" className="dialog-discard" onClick={() => discardExtractionDraft(true)}>
+                    Discard
+                  </button>
+                  <button type="button" className="dialog-cancel" onClick={() => setShowUnsavedDialog(false)}>
+                    Keep editing
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
         </div>
       )}
     </main>

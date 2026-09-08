@@ -75,3 +75,24 @@ async def test_invalid_correction_stays_in_review(client: AsyncClient) -> None:
     assert body["decision"]["outcome"] == "NEEDS_REVIEW"
     document = await client.get(f"/documents/{document_id}")
     assert document.json()["status"] == "NEEDS_REVIEW"
+
+
+async def test_completed_invoice_can_be_edited_and_revalidated(client: AsyncClient) -> None:
+    uploaded = await client.post(
+        "/documents", files={"file": ("invoice.pdf", make_pdf(1), "application/pdf")}
+    )
+    document_id = uploaded.json()["document_id"]
+    pipeline = await client.post(f"/documents/{document_id}/pipeline")
+    extraction_id = pipeline.json()["extraction"]["extraction_id"]
+    correction = _correction(pipeline.json()["decision"]["decision_id"])
+    correction.pop("source_decision_id")
+    correction["source_extraction_id"] = extraction_id
+
+    response = await client.post(
+        f"/documents/{document_id}/corrections", json=correction
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["approved"] is True
+    assert response.json()["extraction"]["extraction_id"] != extraction_id
+    document = await client.get(f"/documents/{document_id}")
+    assert document.json()["status"] == "COMPLETED"

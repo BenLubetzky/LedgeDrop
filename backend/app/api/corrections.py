@@ -49,9 +49,11 @@ async def submit_correction(
     document = result.scalar_one_or_none()
     if document is None:
         raise NotFoundError("No document exists with that ID.", code="DOCUMENT_NOT_FOUND")
-    if document.status is not DocumentStatus.NEEDS_REVIEW:
+    original_status = document.status
+    if document.status not in {DocumentStatus.NEEDS_REVIEW, DocumentStatus.COMPLETED}:
         raise ConflictError(
-            "This document is not awaiting corrections.", code="DOCUMENT_NOT_REVIEWABLE"
+            "This document cannot be corrected in its current state.",
+            code="DOCUMENT_NOT_CORRECTABLE",
         )
 
     extractions = ExtractionRepository(db)
@@ -71,7 +73,17 @@ async def submit_correction(
         await decisions.latest_for_validation(current_validation.validation_id)
         if current_validation else None
     )
-    if current_decision is None or current_decision.decision_id != body.source_decision_id:
+    decision_matches = (
+        body.source_decision_id is not None
+        and current_decision is not None
+        and current_decision.decision_id == body.source_decision_id
+    )
+    extraction_matches = (
+        body.source_extraction_id is not None
+        and current_extraction is not None
+        and current_extraction.extraction_id == body.source_extraction_id
+    )
+    if not decision_matches and not extraction_matches:
         raise ConflictError(
             "This review has been superseded; reload the latest invoice data.",
             code="STALE_DECISION_SOURCE",
@@ -88,7 +100,12 @@ async def submit_correction(
         body.as_extraction(),
         raw_response={
             "source": "human-correction",
-            "source_decision_id": str(body.source_decision_id),
+            "source_decision_id": (
+                str(body.source_decision_id) if body.source_decision_id else None
+            ),
+            "source_extraction_id": (
+                str(body.source_extraction_id) if body.source_extraction_id else None
+            ),
             "reviewer_name": body.reviewer_name,
             "note": body.note,
         },
@@ -105,7 +122,11 @@ async def submit_correction(
     if approved:
         document = await db.get(Document, document_id, with_for_update=True)
         assert document is not None
-        document.status = DocumentStatus.APPROVED
+        document.status = (
+            DocumentStatus.APPROVED
+            if original_status is DocumentStatus.NEEDS_REVIEW
+            else DocumentStatus.COMPLETED
+        )
         await db.commit()
 
     refreshed_extraction = await extractions.get(attempt.extraction_id) or attempt

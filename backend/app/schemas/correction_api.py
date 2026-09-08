@@ -33,8 +33,9 @@ class CorrectionLineItem(BaseModel):
 class InvoiceCorrectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_decision_id: uuid.UUID
-    reviewer_name: str = Field(min_length=1, max_length=200)
+    source_decision_id: uuid.UUID | None = None
+    source_extraction_id: uuid.UUID | None = None
+    reviewer_name: str = Field(default="Workspace editor", min_length=1, max_length=200)
     note: str | None = Field(default=None, max_length=4000)
     invoice_number: str | None = None
     invoice_date: str | None = None
