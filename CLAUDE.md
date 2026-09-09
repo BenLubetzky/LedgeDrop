@@ -138,16 +138,53 @@ and an approve/reject form, rendering only client-safe fields.
 native SWC binary is blocked by Smart App Control on this machine — same
 constraint as the Python toolchain).
 
-**Field corrections / reprocessing: explicitly deferred to Stage 8** (confirmed
-with the project owner). A Stage 7 reviewer only approves or rejects; a wrong
-value is a `REJECT` with a note. Stage 8 sketch (separate append-only
-corrections store never writing to Stage 2–6 rows, a `normalized ⊕ corrections`
-merge view for revalidation and re-decision, inline-edit UI) is in
-`docs/stage-7-review.md`.
-
 **Scope limits:** queue, inspect, approve/reject, and audit trail only.
-Corrections/reprocessing are Stage 8; notifications,
-authentication/organizations, and downstream posting remain later-stage work.
+Notifications, authentication/organizations, and downstream posting remain
+later-stage work.
+
+## Stage 8 (reviewer corrections and re-decision): complete
+
+Stage 8 records a **human correction** of a document's canonical invoice data,
+re-runs the deterministic stages against the corrected values, and resolves the
+document's status from the new outcome. Full spec — boundary, the four pinned
+policies, persistence, the merge projection, the lifecycle/status matrix, the
+API, the reviewer UI, and the verification map — is in
+`docs/stage-8-corrections.md`.
+
+**Pinned policy (project owner).** (1) Corrections are a **separate
+append-only store** (`invoice_corrections` / `invoice_correction_fields`) with a
+`base ⊕ corrections` merge projection; no Stage 2–7 row or the stored PDF is
+ever mutated — the corrected canonical values are persisted as a **new**
+`invoice_normalizations` attempt (tagged `source_correction_id`) beside the
+immutable Stage 4 engine attempt. The pre-Stage-8 `/documents/{id}/corrections`
+shortcut, which wrote a fake `human-correction` extraction attempt, is removed.
+(2) A document is correctable from `NEEDS_REVIEW`, `COMPLETED`, `APPROVED`, or
+`REJECTED`. (3) A re-decision of `ACCEPTED` **auto-accepts** — to `APPROVED`
+from `NEEDS_REVIEW` / `APPROVED` / `REJECTED`, staying `COMPLETED` from
+`COMPLETED`; a re-decision of `NEEDS_REVIEW` returns the document to the review
+queue (against the new decision attempt). `documents.status` gains no new
+value. (4) Every correction spawns a **new attempt chain**
+(normalization → validation → decision), all attempts kept; the terminal
+outcome is always the latest decision attempt plus any Stage 7 review on it.
+
+**Code.** `backend/app/schemas/correction*.py`,
+`backend/app/models/correction.py` (`CorrectionAttempt` / `CorrectionFieldRow`;
+migration `0008_correction_tables`; adds
+`invoice_normalizations.source_correction_id`),
+`backend/app/services/processing/correction/` (`projection.py` is the pure
+`base ⊕ corrections` merge reusing the Stage 4 field normalizers;
+`lifecycle.py` / `repository.py` / `service.py` mirror the Stage 5–7 shape and
+additionally lock and write the owning `documents` row),
+`backend/app/api/corrections.py` (submit / retry / list / latest / specific
+routes under `/documents/{id}/corrections`), `get_correction_service` in
+`deps.py`. Frontend: the Stage 7 review-detail editor now targets the new
+endpoint, renders a before/after diff from `entries`, and supports line-item
+add/remove.
+
+**Scope limits:** corrections, re-projection, re-validation, re-decision, and
+the auto-accept/return-to-review resolution only. Line-item re-ordering (as
+distinct from add/remove + edit), notifications, reviewer assignment,
+authentication, and downstream posting remain later-stage work.
 
 ## Technology decisions
 
@@ -176,8 +213,13 @@ Browser -> Next.js frontend -> FastAPI document API
        |-- Normalization          <- Stage 4 (done)
        |-- Validation             <- Stage 5 (done)
        |-- Decision / escalation  <- Stage 6 (done)
-       `-- Human review           <- Stage 7 (done)
+       |-- Human review           <- Stage 7 (done)
+       `-- Reviewer corrections   <- Stage 8 (done)
 ```
+
+Stage 8 re-runs normalization (as a merge projection, not the Stage 4 engine),
+validation, and the decision against `base ⊕ corrections`, then resolves
+`documents.status`.
 
 Extraction and normalization are separate backend subsystems. Provider-specific
 OCR, vision, or LLM responses must not leak into API, database, normalization,
@@ -300,10 +342,8 @@ stage's scope:
 
 - Discarding uncertain fields (Stage 5 confidence findings are implemented)
 - Defaulting missing currency or converting currencies
-- Editing reviewed fields or creating corrected canonical invoice values
-  (**Stage 8** — explicitly deferred; a Stage 7 reviewer only approves or
-  rejects; sketch in `docs/stage-7-review.md`)
-- Reprocessing / revalidation / re-decision after a reviewer correction (Stage 8)
+- Line-item **re-ordering** as a distinct correction operation (Stage 8
+  supports add/remove + edit only)
 - Reviewer notifications or assignment workflows beyond the Stage 7 MVP queue
 - Downstream business-database integration
 - Authentication, organizations, or multi-tenancy
@@ -312,10 +352,11 @@ stage's scope:
 - Autonomous or multi-agent processing
 
 Deterministic validation, reconciliation, confidence checks, and duplicate /
-high-value findings are already implemented in Stage 5. Decision and escalation
-work, including `NEEDS_REVIEW`, is implemented in Stage 6. The queue, read-only
-review view, human approval/rejection, and audit trail belong to the planned
-Stage 7 scope above.
+high-value findings are implemented in Stage 5. Decision and escalation work,
+including `NEEDS_REVIEW`, is implemented in Stage 6. The queue, review view,
+human approval/rejection, and audit trail are implemented in Stage 7. Editable
+field corrections with re-projection, re-validation, re-decision, and the
+auto-accept / return-to-review resolution are Stage 8 (complete).
 
 ## Implementation conduct
 

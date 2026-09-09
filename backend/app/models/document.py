@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base
 
 if TYPE_CHECKING:
+    from app.models.correction import CorrectionAttempt
     from app.models.extraction import ExtractionAttempt
 
 
@@ -96,6 +97,16 @@ class Document(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="ExtractionAttempt.attempt_number",
+    )
+
+    # Stage 8 reviewer corrections of this document's canonical invoice data,
+    # oldest attempt first. Added in Stage 8; does not affect any earlier
+    # stage's behaviour.
+    corrections: Mapped[list[CorrectionAttempt]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="CorrectionAttempt.attempt_number",
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

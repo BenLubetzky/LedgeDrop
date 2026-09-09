@@ -247,7 +247,10 @@ async def test_migration_round_trip_preserves_stage2_6_data_and_is_reversible() 
         assert len(before["invoice_decisions"]) == 1
         assert len(before["invoice_decision_reasons"]) == 1
 
-        _run_alembic("downgrade", "-1", database_url=url)
+        # Target the revision just below 0006 explicitly (not "-1"): later
+        # stages add migrations on top of head, and this test is specifically
+        # about 0006's rename-swap reversibility.
+        _run_alembic("downgrade", "0005_decision_tables", database_url=url)
         assert {"APPROVED", "REJECTED"}.isdisjoint(await _enum_labels(url))
 
         _run_alembic("upgrade", "head", database_url=url)

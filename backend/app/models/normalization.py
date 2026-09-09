@@ -55,6 +55,7 @@ from app.database.base import Base
 from app.schemas.normalization import NormalizationErrorCode
 
 if TYPE_CHECKING:
+    from app.models.correction import CorrectionAttempt
     from app.models.extraction import ExtractionAttempt
     from app.models.validation import ValidationAttempt
 
@@ -145,6 +146,21 @@ class NormalizationAttempt(Base):
     # 1-based; retry N produces attempt_number N. Unique per source extraction.
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # NULL on every Stage 4 engine attempt; set on the projection attempt a
+    # Stage 8 reviewer correction writes (docs/stage-8-corrections.md Part 3.5).
+    # The provenance marker: machine normalization vs. a human correction.
+    source_correction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "invoice_corrections.correction_id",
+            ondelete="SET NULL",
+            name="fk_invoice_normalizations_source_correction",
+            # invoice_corrections also references invoice_normalizations, so
+            # this closes a cycle - emit it as a post-create ALTER.
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+
     status: Mapped[NormalizationStatus] = mapped_column(
         Enum(
             NormalizationStatus,
@@ -189,6 +205,11 @@ class NormalizationAttempt(Base):
     # --- relationships -------------------------------------------------- -----
     source_extraction: Mapped[ExtractionAttempt] = relationship(
         back_populates="normalizations"
+    )
+    # The Stage 8 correction that produced this attempt, or None for a Stage 4
+    # engine attempt. Read-only from here; the correction owns the link.
+    source_correction: Mapped["CorrectionAttempt | None"] = relationship(
+        foreign_keys=lambda: [NormalizationAttempt.source_correction_id],
     )
     line_items: Mapped[list[NormalizationLineItem]] = relationship(
         back_populates="normalization",

@@ -27,6 +27,7 @@ from app.services.processing.extraction.preprocessing import (
     prepare_document,
 )
 from app.services.processing.extraction.provider import ExtractionProvider, ProviderError
+from app.services.processing.correction import CorrectionService
 from app.services.processing.decision import DecisionService
 from app.services.processing.normalization import NormalizationService
 from app.services.processing.pipeline import ProcessingPipeline
@@ -44,6 +45,7 @@ __all__ = [
     "get_validation_service",
     "get_decision_service",
     "get_review_service",
+    "get_correction_service",
     "get_pipeline",
 ]
 
@@ -108,6 +110,19 @@ def get_review_service(
     transition (``NEEDS_REVIEW -> APPROVED | REJECTED``).
     """
     return ReviewService(db)
+
+
+def get_correction_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CorrectionService:
+    """Build a :class:`CorrectionService` bound to the request's session.
+
+    Correcting is a database-only operation - no provider, no AI, no network.
+    It merges the reviewer's edits onto the current normalized result, persists
+    the diff, re-runs the (offline, deterministic) Stage 5 validation and Stage
+    6 decision over the merged projection, and resolves ``documents.status``.
+    """
+    return CorrectionService(db)
 
 
 def get_pipeline(

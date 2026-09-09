@@ -7,12 +7,17 @@ added deterministic **normalization** of a completed extraction; Stage 5 added
 deterministic **validation** of a completed normalization; Stage 6 added the
 deterministic **decision** over a completed validation — `ACCEPTED` or
 `NEEDS_REVIEW`, with ordered reasons — wired together as
-`upload → extraction → normalization → validation → decision`. Stages 2–6 are
+`upload → extraction → normalization → validation → decision`. Stages 2–7 are
 complete for English-language PDF invoices. Stage 7 adds the **human review**
 of a `NEEDS_REVIEW` decision — `APPROVE` / `REJECT` with an audit trail, moving
-the document to a terminal `APPROVED` / `REJECTED` status — and is complete
-(backend here; the reviewer UI is in `frontend/`). Field corrections and
-reprocessing are deferred to Stage 8.
+the document to a terminal `APPROVED` / `REJECTED` status. Stage 8 is complete
+and adds **reviewer corrections**: an append-only
+`invoice_corrections` / `invoice_correction_fields` store, a
+`base ⊕ corrections` merge projection persisted as a new normalization
+attempt, a re-run of validation and the decision over it, and an
+auto-accept / return-to-review resolution of `documents.status` — via
+`POST /documents/{id}/corrections` (`docs/stage-8-corrections.md`). No Stage
+2–7 row or the stored PDF is ever mutated.
 
 ## Requirements
 

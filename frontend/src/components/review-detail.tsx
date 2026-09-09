@@ -32,12 +32,36 @@ type Chain = {
 };
 
 type Resolved = { action: "APPROVE" | "REJECT"; reviewer: string };
+type CorrectionEntry = {
+  operation: "SET_FIELD" | "ADD_LINE_ITEM" | "REMOVE_LINE_ITEM";
+  field_path: string;
+  previous_value: string | null;
+  raw_value: string | null;
+  normalized_value: string | null;
+  error_code: string | null;
+  error_message: string | null;
+};
 type CorrectionResult = {
-  extraction: ExtractionResult;
-  normalization: NormalizationResult;
-  validation: ValidationResult;
-  decision: DecisionResult;
-  approved: boolean;
+  correction_id: string;
+  attempt_number: number;
+  status: "PROCESSING" | "COMPLETED" | "FAILED";
+  reviewer_name: string;
+  submitted_at: string;
+  resulting_outcome: "ACCEPTED" | "NEEDS_REVIEW" | null;
+  resulting_document_status:
+    | "COMPLETED"
+    | "NEEDS_REVIEW"
+    | "APPROVED"
+    | "REJECTED"
+    | null;
+  failure_message: string | null;
+  entries: CorrectionEntry[];
+  pipeline: {
+    extraction: ExtractionResult;
+    normalization: NormalizationResult;
+    validation: ValidationResult;
+    decision: DecisionResult;
+  } | null;
 };
 type ScalarKey = keyof Omit<NormalizedData, "line_items" | "errors">;
 type EditableLineItem = NormalizedData["line_items"][number];
@@ -96,12 +120,14 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [resolved, setResolved] = useState<Resolved | null>(null);
   const [invoiceDraft, setInvoiceDraft] = useState<InvoiceDraft | null>(null);
+  const [lastEntries, setLastEntries] = useState<CorrectionEntry[] | null>(null);
+  const [correctionHistory, setCorrectionHistory] = useState<CorrectionResult[]>([]);
 
   const load = useCallback(async () => {
     setLoadError(null);
     try {
       const doc = await getJson<DocumentRecord>(`/documents/${documentId}`);
-      if (doc.status !== "NEEDS_REVIEW") {
+      if (!["NEEDS_REVIEW", "COMPLETED", "APPROVED", "REJECTED"].includes(doc.status)) {
         setChain(null);
         setLoadError(
           `This invoice is ${doc.status
@@ -134,6 +160,9 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
       };
       setChain(loadedChain);
       setInvoiceDraft(invoiceDraftFromChain(loadedChain));
+      setCorrectionHistory(
+        await getJson<CorrectionResult[]>(`/documents/${documentId}/corrections`),
+      );
     } catch (err) {
       setLoadError(errorMessage(err, "This invoice could not be loaded."));
     } finally {
@@ -192,15 +221,30 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
           );
         }
         const corrected = body as CorrectionResult;
-        if (corrected.approved) {
+        setLastEntries(corrected.entries);
+        setCorrectionHistory((current) => [
+          corrected,
+          ...current.filter((item) => item.correction_id !== corrected.correction_id),
+        ]);
+        if (corrected.status === "FAILED") {
+          setSubmitError(
+            corrected.failure_message ??
+              "The correction did not complete. Try again.",
+          );
+          return;
+        }
+        if (corrected.resulting_outcome === "ACCEPTED") {
           setResolved({ action: chosen, reviewer: trimmedReviewer });
-        } else {
+        } else if (corrected.pipeline) {
           const correctedChain: Chain = {
-            document: chain.document,
-            extraction: corrected.extraction,
-            normalization: corrected.normalization,
-            validation: corrected.validation,
-            decision: corrected.decision,
+            document: {
+              ...chain.document,
+              status: corrected.resulting_document_status ?? chain.document.status,
+            },
+            extraction: corrected.pipeline.extraction,
+            normalization: corrected.pipeline.normalization,
+            validation: corrected.pipeline.validation,
+            decision: corrected.pipeline.decision,
           };
           setChain(correctedChain);
           setInvoiceDraft(invoiceDraftFromChain(correctedChain));
@@ -332,11 +376,55 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
                 <div className="editor-lines-head">
                   <h3>Line items</h3>
                   <span>{invoiceDraft.line_items.length}</span>
+                  <button
+                    type="button"
+                    className="line-btn"
+                    onClick={() =>
+                      setInvoiceDraft((current) =>
+                        current
+                          ? {
+                              ...current,
+                              line_items: [
+                                ...current.line_items,
+                                {
+                                  description: "",
+                                  quantity: "",
+                                  unit_price: "",
+                                  line_total: "",
+                                },
+                              ],
+                            }
+                          : current,
+                      )
+                    }
+                  >
+                    + Add line
+                  </button>
                 </div>
                 <div className="line-editor-list">
                   {invoiceDraft.line_items.map((line, index) => (
                     <fieldset className="line-editor" key={index}>
-                      <legend>Line {index + 1}</legend>
+                      <legend>
+                        Line {index + 1}
+                        <button
+                          type="button"
+                          className="line-btn line-btn-remove"
+                          onClick={() =>
+                            setInvoiceDraft((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    line_items: current.line_items.filter(
+                                      (_, i) => i !== index,
+                                    ),
+                                  }
+                                : current,
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </legend>
                       {(
                         [
                           ["description", "Description"],
@@ -370,17 +458,63 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
               </section>
             )}
 
+            {lastEntries && lastEntries.length > 0 && (
+              <section className="detail-section before-after">
+                <h2>
+                  What changed{" "}
+                  <span className="count-pill">{lastEntries.length}</span>
+                </h2>
+                <ul className="diff-list">
+                  {lastEntries.map((entry, index) => (
+                    <li
+                      key={`${entry.field_path}-${index}`}
+                      className={entry.error_code ? "diff-row has-error" : "diff-row"}
+                    >
+                      <span className="diff-op">
+                        {entry.operation === "ADD_LINE_ITEM"
+                          ? "added"
+                          : entry.operation === "REMOVE_LINE_ITEM"
+                            ? "removed"
+                            : "edited"}
+                      </span>
+                      <div>
+                        <p className="diff-field">
+                          {fieldPathLabel(entry.field_path) ?? entry.field_path}
+                        </p>
+                        {entry.operation === "SET_FIELD" && (
+                          <p className="diff-values">
+                            <span className="diff-before">
+                              {entry.previous_value ?? "—"}
+                            </span>
+                            {" → "}
+                            <span className="diff-after">
+                              {entry.error_code
+                                ? `${entry.raw_value ?? "—"} (rejected)`
+                                : entry.normalized_value ?? "—"}
+                            </span>
+                          </p>
+                        )}
+                        {entry.error_message && (
+                          <p className="diff-error">{entry.error_message}</p>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
             {resolved ? (
               <div
                 className={`resolution-banner is-${resolved.action.toLowerCase()}`}
                 role="status"
               >
                 <strong>
-                  {resolved.action === "APPROVE" ? "Approved" : "Rejected"}
+                  {resolved.action === "APPROVE" ? "Corrected and approved" : "Rejected"}
                 </strong>
                 <span>
-                  Recorded by {resolved.reviewer}. This invoice has left the
-                  review queue.
+                  Recorded by {resolved.reviewer}. The corrected invoice passed
+                  validation and its workflow is complete.
                 </span>
                 <Link className="resolution-link" href="/review">
                   Back to the queue
@@ -435,22 +569,26 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
                   >
                     {isSubmitting && action === "APPROVE"
                       ? "Validating…"
-                      : "Validate & approve"}
+                      : chain.document.status === "NEEDS_REVIEW"
+                        ? "Validate & approve"
+                        : "Validate & save"}
                   </button>
-                  <button
-                    type="button"
-                    className="btn-reject"
-                    onClick={() => void submit("REJECT")}
-                    disabled={
-                      isSubmitting ||
-                      trimmedReviewer.length === 0 ||
-                      trimmedNote.length === 0
-                    }
-                  >
-                    {isSubmitting && action === "REJECT"
-                      ? "Rejecting…"
-                      : "Reject"}
-                  </button>
+                  {chain.document.status === "NEEDS_REVIEW" && (
+                    <button
+                      type="button"
+                      className="btn-reject"
+                      onClick={() => void submit("REJECT")}
+                      disabled={
+                        isSubmitting ||
+                        trimmedReviewer.length === 0 ||
+                        trimmedNote.length === 0
+                      }
+                    >
+                      {isSubmitting && action === "REJECT"
+                        ? "Rejecting…"
+                        : "Reject"}
+                    </button>
+                  )}
                 </div>
                 <p className="decision-hint">
                   Approval saves these corrections, then runs normalization and
@@ -534,6 +672,34 @@ export function ReviewDetail({ documentId }: { documentId: string }) {
                 </ul>
               ) : (
                 <p className="muted">No validation findings.</p>
+              )}
+            </section>
+
+            <section className="detail-section">
+              <h2>
+                Correction history{" "}
+                <span className="count-pill">{correctionHistory.length}</span>
+              </h2>
+              {correctionHistory.length > 0 ? (
+                <ul className="diff-list">
+                  {correctionHistory.map((correction) => (
+                    <li className="diff-row" key={correction.correction_id}>
+                      <span className="diff-op">#{correction.attempt_number}</span>
+                      <div>
+                        <p className="diff-field">
+                          {correction.resulting_outcome ?? correction.status}
+                        </p>
+                        <p className="diff-values">
+                          {correction.reviewer_name} · {formatDateTime(correction.submitted_at)} ·{" "}
+                          {correction.entries.length} changed field
+                          {correction.entries.length === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">No corrections have been recorded.</p>
               )}
             </section>
 

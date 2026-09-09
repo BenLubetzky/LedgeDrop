@@ -667,14 +667,22 @@ export function DocumentDashboard() {
                       {document.status.replace("_", " ")}
                     </span>
                     {["COMPLETED", "NEEDS_REVIEW", "APPROVED", "REJECTED"].includes(document.status) ? (
-                      <button
-                        className="extraction-button"
-                        type="button"
-                        onClick={() => void showExtraction(document)}
-                        disabled={extractingDocumentId === document.document_id}
-                      >
-                        {extractingDocumentId === document.document_id ? "Loading…" : "View extraction"}
-                      </button>
+                      <>
+                        <button
+                          className="extraction-button"
+                          type="button"
+                          onClick={() => void showExtraction(document)}
+                          disabled={extractingDocumentId === document.document_id}
+                        >
+                          {extractingDocumentId === document.document_id ? "Loading…" : "View extraction"}
+                        </button>
+                        <Link
+                          className="extraction-button"
+                          href={`/review/${document.document_id}`}
+                        >
+                          Edit
+                        </Link>
+                      </>
                     ) : (
                       <button
                         className="extraction-button"
@@ -792,13 +800,12 @@ export function DocumentDashboard() {
                     </button>
                   </>
                 ) : (
-                  <button
+                  <Link
                     className="panel-edit panel-edit-trigger"
-                    type="button"
-                    onClick={() => setIsEditingExtraction(true)}
+                    href={`/review/${selectedExtraction.document_id}`}
                   >
                     Edit
-                  </button>
+                  </Link>
                 )}
                 <button
                   className="panel-close"
