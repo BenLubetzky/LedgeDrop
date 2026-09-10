@@ -42,6 +42,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError
+from app.core.metrics import observe_stage
 from app.models.document import Document, DocumentStatus
 from app.models.extraction import ExtractionAttempt, ExtractionStatus
 from app.schemas.extraction import InvoiceExtraction
@@ -88,7 +89,7 @@ class ExtractionService:
 
     # --- public API --------------------------------------------------------
 
-    async def start( 
+    async def start(
         self,
         document_id: uuid.UUID,
         *,
@@ -98,13 +99,16 @@ class ExtractionService:
         raw_response: dict[str, Any] | None = None,
     ) -> ExtractionAttempt:
         """Run the first extraction for an ``UPLOADED`` document."""
-        return await self._run(
-            document_id,
-            action="start",
-            produce=produce,
-            provider_name=provider_name,
-            provider_model=provider_model,
-            raw_response=raw_response,
+        return await observe_stage(
+            "extraction",
+            self._run(
+                document_id,
+                action="start",
+                produce=produce,
+                provider_name=provider_name,
+                provider_model=provider_model,
+                raw_response=raw_response,
+            ),
         )
 
     async def retry(
@@ -117,13 +121,16 @@ class ExtractionService:
         raw_response: dict[str, Any] | None = None,
     ) -> ExtractionAttempt:
         """Run a fresh extraction attempt for a document whose last one FAILED."""
-        return await self._run(
-            document_id,
-            action="retry",
-            produce=produce,
-            provider_name=provider_name,
-            provider_model=provider_model,
-            raw_response=raw_response,
+        return await observe_stage(
+            "extraction",
+            self._run(
+                document_id,
+                action="retry",
+                produce=produce,
+                provider_name=provider_name,
+                provider_model=provider_model,
+                raw_response=raw_response,
+            ),
         )
 
     # --- orchestration -------------------------------------------------- --

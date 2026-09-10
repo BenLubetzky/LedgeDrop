@@ -26,28 +26,18 @@ import os
 import shutil
 import tempfile
 import uuid
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import anyio
 
+from app.services.storage.base import FileStorage, StorageError, StoredFile
+
+__all__ = ["LocalFileStorage", "StorageError", "StoredFile", "ORIGINAL_FILENAME"]
+
 ORIGINAL_FILENAME = "original.pdf"
 
 
-class StorageError(RuntimeError):
-    """Raised when a storage operation fails or is asked to act outside its root."""
-
-
-@dataclass(frozen=True)
-class StoredFile:
-    """Result of a successful write."""
-
-    location: str  # storage-root-relative POSIX path, for documents.file_location
-    path: Path  # absolute path on this machine
-    size_bytes: int
-
-
-class LocalFileStorage:
+class LocalFileStorage(FileStorage):
     def __init__(self, base_dir: str | os.PathLike[str]) -> None:
         self._base_dir = Path(base_dir).resolve()
 
@@ -98,13 +88,25 @@ class LocalFileStorage:
         """Resolve ``location`` to an existing file path inside the storage root.
 
         Raises :class:`StorageError` if the location escapes the root (see
-        :meth:`resolve`) or if no file exists there. Callers use the returned
-        path only to stream the file; it is never surfaced to API clients.
+        :meth:`resolve`) or if no file exists there. Local-only: object-store
+        backends have no path, so shared call sites use :meth:`get_bytes`.
         """
         path = self.resolve(location)
         if not await anyio.to_thread.run_sync(path.is_file):
             raise StorageError(f"No stored file at {location!r}.")
         return path
+
+    async def get_bytes(self, location: str) -> bytes:
+        """Return the stored bytes at ``location``.
+
+        Raises :class:`StorageError` if the location escapes the root or no file
+        exists there.
+        """
+        path = await self.path_for(location)
+        try:
+            return await anyio.to_thread.run_sync(path.read_bytes)
+        except OSError as exc:  # pragma: no cover - race between stat and read
+            raise StorageError(f"Failed to read stored file at {location!r}.") from exc
 
     async def delete(self, document_id: uuid.UUID | str) -> None:
         """Remove a document's directory. No-op if it does not exist."""

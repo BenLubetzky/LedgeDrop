@@ -30,7 +30,7 @@ from pypdf import PdfReader
 
 from app.core.config import settings
 from app.models.document import Document
-from app.services.storage import LocalFileStorage, StorageError
+from app.services.storage import FileStorage, StorageError
 
 logger = logging.getLogger("app.extraction.preprocessing")
 
@@ -178,7 +178,7 @@ def _prepare_bytes(
 
 async def prepare_document(
     document: Document,
-    storage: LocalFileStorage,
+    storage: FileStorage,
     *,
     max_pages: int | None = None,
 ) -> PreparedDocument:
@@ -189,19 +189,11 @@ async def prepare_document(
     """
     limit = settings.max_pdf_pages if max_pages is None else max_pages
     try:
-        path = await storage.path_for(document.file_location)
+        data = await storage.get_bytes(document.file_location)
     except StorageError as exc:
         raise PreprocessingError(
             PreprocessingErrorCode.PDF_UNAVAILABLE,
             "The stored PDF for this document is unavailable.",
-        ) from exc
-
-    try:
-        data = await anyio.to_thread.run_sync(path.read_bytes)
-    except OSError as exc:  # pragma: no cover - race between path_for and read
-        raise PreprocessingError(
-            PreprocessingErrorCode.PDF_UNAVAILABLE,
-            "The stored PDF for this document could not be read.",
         ) from exc
 
     return await anyio.to_thread.run_sync(

@@ -186,6 +186,58 @@ the auto-accept/return-to-review resolution only. Line-item re-ordering (as
 distinct from add/remove + edit), notifications, reviewer assignment,
 authentication, and downstream posting remain later-stage work.
 
+## Stage 9 (deployment readiness and MVP hardening): operational acceptance pending
+
+**Status: the Packages 1–9 implementation is present; what remains is
+operator execution against live infrastructure (a Render account + Cloudflare
+R2) — provisioning, the local→R2 data cutover, a tested backup restore, and the
+release + rollback rehearsals.** Stage 9 adds **no** document-processing
+feature, changes **no** Stage 2–8 API/schema/lifecycle contract, and adds
+**no** authentication. Full spec, per-package status, completion gate,
+verification map, and the ⚠ provisional-values register:
+`docs/stage-9-deployment-readiness.md`. Operator procedures:
+`docs/stage-9-runbook.md`.
+
+**In-repo deliverables.** `render.yaml` Blueprint (two isolated environments).
+Production settings + `DATABASE_URL` scheme coercion + fail-fast
+`check_deployment_safety` (a post-model `DeploymentConfigError`, not a pydantic
+validator, so no secret reaches a traceback) + `.env.production.example` files.
+`backend/Dockerfile` + `frontend/Dockerfile` (non-root, `output: "standalone"`)
++ `.dockerignore` × 2 + `docker-compose.prod.yml`. `FileStorage` ABC with
+`LocalFileStorage` + `S3FileStorage` (aioboto3/R2) behind `build_storage`; the
+read path uses `get_bytes` (no filesystem path leaves storage);
+`backend/scripts/migrate_uploads_to_s3.py` cutover script; DB pool bounds.
+Edge hardening in `app/core/middleware.py` + `rate_limit.py`: request-id,
+security headers, body cap, `TrustedHostMiddleware`, narrowed CORS, `slowapi`
+(off by default), `/docs` off in production. Observability in
+`app/core/observability.py`: JSON logs with `request_id`, Sentry hook,
+`/health` vs `/health/ready` (+ storage probe), `/metrics` +
+`ledgerdrop_uploads_total`, pipeline stage duration/failure/outcome metrics,
+and the review-queue-depth gauge. Guarded interrupted-worker recovery is in
+`backend/scripts/recover_stuck_attempts.py`. `docs/stage-9-runbook.md` +
+`backend/scripts/staging_smoke.py`.
+
+**Pinned policy (project owner).** (1) **Platform: Render** — managed
+PostgreSQL, Docker web services, per-environment configuration groups,
+service-scoped prompted secrets, `render.yaml`
+Blueprint IaC. (2) **Durable object storage: Cloudflare R2** (S3 API) via a new
+`S3FileStorage` behind the storage interface; `LocalFileStorage` stays the
+development/test default. (3) **Environments: staging and production**, fully
+isolated (own database, own R2 bucket, own keys); staging exists for the
+Package 8 end-to-end verification and the Package 9 release/rollback
+rehearsals. (4) Still the invoice MVP — auth, orgs/tenancy, notifications,
+reviewer assignment, downstream posting, line-item re-ordering, and non-PDF
+input stay out of scope; operational security to deploy safely is in scope,
+an identity/permissions product is not.
+
+**Operator-owned areas** (recorded in the spec's per-package status): alert
+rules are configured in Render/Sentry and release, rollback, restore, and
+interrupted-worker drills run against live infrastructure. New backend dependencies:
+`aioboto3`, `slowapi`, `sentry-sdk`, `prometheus-fastapi-instrumentator`
+(runtime); `moto[s3,server]` (dev).
+
+The completion gate and the full out-of-scope list are in the spec.
+
 ## Technology decisions
 
 - Frontend: Next.js with TypeScript
@@ -194,7 +246,8 @@ authentication, and downstream posting remain later-stage work.
 - Database: PostgreSQL only; do not use SQLite
 - Database migrations: Alembic
 - Development file storage: local filesystem
-- Production object storage: deferred
+- Production object storage: Cloudflare R2 (S3 API), pinned in Stage 9 with
+  Render as the hosting platform; `S3FileStorage` behind the storage interface
 - Overall architecture: modular monolith, not microservices
 - AI/extraction provider: OpenAI GPT-5-mini is the current adapter, behind the
   `ExtractionProvider` interface. Azure AI Document Intelligence
@@ -329,11 +382,17 @@ Do not broaden input support to images or other file types.
 
 ## Configuration
 
-Existing: `DATABASE_URL`, `UPLOAD_DIRECTORY`, `MAX_FILE_SIZE_MB=20`,
+Development/base: `DATABASE_URL`, `UPLOAD_DIRECTORY`, `MAX_FILE_SIZE_MB=20`,
 `MAX_PDF_PAGES=10`, `EXTRACTION_PROVIDER=fake|openai` (plus the OpenAI API key
-when `openai` is selected). Add Stage 4 configuration only if a normalization
-policy genuinely requires it. Keep safe placeholders in `.env.example`; never
-commit credentials or machine-specific values.
+when `openai` is selected). Stage 9 adds `ENVIRONMENT` (now
+`development|test|staging|production`), `LOG_FORMAT=text|json`, `TRUSTED_HOSTS`,
+`STORAGE_BACKEND=local|s3` with `S3_BUCKET` / `S3_ENDPOINT_URL` / `S3_REGION` /
+`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_KEY_PREFIX`,
+`RATE_LIMIT_ENABLED` / `RATE_LIMIT_DEFAULT` / `RATE_LIMIT_UPLOAD`, and
+`SENTRY_DSN`. A `staging`/`production` process fails to boot unless the
+configuration is deploy-safe (see `check_deployment_safety`). Keep safe
+placeholders in `.env.example` and `.env.production.example` (backend and
+frontend); never commit credentials or machine-specific values.
 
 ## Explicitly excluded until later stages
 
@@ -347,7 +406,6 @@ stage's scope:
 - Reviewer notifications or assignment workflows beyond the Stage 7 MVP queue
 - Downstream business-database integration
 - Authentication, organizations, or multi-tenancy
-- Production object storage or deployment infrastructure
 - Images or non-PDF upload support
 - Autonomous or multi-agent processing
 
@@ -356,7 +414,10 @@ high-value findings are implemented in Stage 5. Decision and escalation work,
 including `NEEDS_REVIEW`, is implemented in Stage 6. The queue, review view,
 human approval/rejection, and audit trail are implemented in Stage 7. Editable
 field corrections with re-projection, re-validation, re-decision, and the
-auto-accept / return-to-review resolution are Stage 8 (complete).
+auto-accept / return-to-review resolution are Stage 8 (complete). Deployment
+readiness, durable production storage, operational security, observability,
+recovery, and release verification are Stage 9 (implementation complete;
+operator execution against live Render + R2 infrastructure remains).
 
 ## Implementation conduct
 

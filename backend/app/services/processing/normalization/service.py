@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError
+from app.core.metrics import observe_stage
 from app.models.extraction import ExtractionAttempt
 from app.models.normalization import NormalizationAttempt, NormalizationStatus
 from app.schemas.extraction_persistence import invoice_extraction_from_attempt
@@ -80,11 +81,11 @@ class NormalizationService:
 
     async def start(self, extraction_id: uuid.UUID) -> NormalizationAttempt:
         """Run the first normalization for a ``COMPLETED`` extraction."""
-        return await self._run(extraction_id, action="start")
+        return await observe_stage("normalization", self._run(extraction_id, action="start"))
 
     async def retry(self, extraction_id: uuid.UUID) -> NormalizationAttempt:
         """Run a fresh attempt for an extraction whose last normalization FAILED."""
-        return await self._run(extraction_id, action="retry")
+        return await observe_stage("normalization", self._run(extraction_id, action="retry"))
 
     # --- orchestration ------------------------------------------------- --
 

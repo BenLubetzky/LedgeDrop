@@ -20,10 +20,18 @@ from app.core.config import settings
 # The engine configures and manages the communication line between SQLAlchemy/Python
 # and the database, make sure to check whether a connection is alive before reusing,
 # use newer versions.
+#
+# Pool bounds are sized for the Stage 9 single-instance deployment (Part 5.3 of
+# docs/stage-9-deployment-readiness.md): a small fixed pool well under the
+# managed database's connection limit, recycled every 30 min so a
+# silently-dropped backend connection is replaced rather than reused.
 engine = create_async_engine(
     settings.database_url,
     echo=settings.db_echo,
     pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=5,
+    pool_recycle=1800,
     future=True,
 )
 

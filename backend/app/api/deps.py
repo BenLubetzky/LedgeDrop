@@ -33,7 +33,7 @@ from app.services.processing.normalization import NormalizationService
 from app.services.processing.pipeline import ProcessingPipeline
 from app.services.processing.review import ReviewService
 from app.services.processing.validation import ValidationService
-from app.services.storage import LocalFileStorage
+from app.services.storage import FileStorage, build_storage
 
 __all__ = [
     "get_db",
@@ -49,11 +49,11 @@ __all__ = [
     "get_pipeline",
 ]
 
-_storage = LocalFileStorage(settings.upload_directory)
+_storage = build_storage(settings)
 
 
-def get_storage() -> LocalFileStorage:
-    """Return the process-wide local file storage service."""
+def get_storage() -> FileStorage:
+    """Return the process-wide file storage backend (local or S3, per config)."""
     return _storage
 
 
@@ -168,7 +168,7 @@ def get_extractor() -> ExtractionProvider:
 
 
 def get_prepared_result_producer(
-    storage: Annotated[LocalFileStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     provider: Annotated[ExtractionProvider, Depends(get_extractor)],
 ) -> ResultProducer:
     """Compose stored-PDF preprocessing with the configured provider.

@@ -1,0 +1,135 @@
+# LedgerDrop Render Blueprint — Stage 9, Package 1.
+# Dockerfiles and production settings referenced here land in Packages 2–3,
+# Apply only after reviewing the environment-specific values and secrets below.
+
+projects:
+  - name: LedgerDrop
+    environments:
+      - name: staging
+        networking:
+          isolation: enabled
+        databases:
+          - name: ledgerdrop-db-staging
+            databaseName: ledgerdrop
+            user: ledgerdrop
+            region: oregon                # ⚠ confirm data residency
+            plan: basic-256mb             # ⚠ legacy ID; paid staging tier
+            ipAllowList: []
+        envVarGroups:
+          - name: ledgerdrop-staging
+            envVars:
+              - { key: ENVIRONMENT, value: staging }
+              - { key: DEBUG, value: "false" }
+              - { key: LOG_FORMAT, value: json }
+              - { key: CORS_ALLOW_ORIGINS, value: "https://ledgerdrop-frontend-staging.onrender.com" } # ⚠
+              - { key: TRUSTED_HOSTS, value: ledgerdrop-backend-staging.onrender.com } # ⚠
+              - { key: MAX_FILE_SIZE_MB, value: "20" }
+              - { key: MAX_PDF_PAGES, value: "10" }
+              - { key: STORAGE_BACKEND, value: s3 }
+              - { key: S3_BUCKET, value: ledgerdrop-uploads-staging }
+              - { key: S3_REGION, value: auto }
+              - { key: S3_KEY_PREFIX, value: "" }
+              - { key: EXTRACTION_PROVIDER, value: openai }
+              - { key: OPENAI_MODEL, value: gpt-5-mini }
+              - { key: EXTRACTION_PROVIDER_TIMEOUT_SECONDS, value: "60" }
+              - { key: RATE_LIMIT_ENABLED, value: "true" }
+              - { key: RATE_LIMIT_DEFAULT, value: 60/minute } # ⚠
+              - { key: RATE_LIMIT_UPLOAD, value: 10/minute } # ⚠
+        services:
+          - type: web
+            name: ledgerdrop-backend-staging
+            runtime: docker
+            region: oregon
+            plan: starter                 # ⚠ legacy ID, still supported
+            dockerfilePath: backend/Dockerfile
+            dockerContext: backend
+            healthCheckPath: /health
+            autoDeployTrigger: "off"
+            preDeployCommand: alembic upgrade head
+            envVars:
+              - fromGroup: ledgerdrop-staging
+              - key: DATABASE_URL
+                fromDatabase: { name: ledgerdrop-db-staging, property: connectionString }
+              # sync:false is unsupported inside groups, so secrets belong here.
+              - { key: S3_ENDPOINT_URL, sync: false }
+              - { key: S3_ACCESS_KEY_ID, sync: false }
+              - { key: S3_SECRET_ACCESS_KEY, sync: false }
+              - { key: OPENAI_API_KEY, sync: false }
+              - { key: SENTRY_DSN, sync: false }
+          - type: web
+            name: ledgerdrop-frontend-staging
+            runtime: docker
+            region: oregon
+            plan: starter                 # ⚠ legacy ID, still supported
+            dockerfilePath: frontend/Dockerfile
+            dockerContext: frontend
+            healthCheckPath: /
+            autoDeployTrigger: "off"
+            envVars:
+              - { key: NEXT_PUBLIC_API_BASE_URL, value: "https://ledgerdrop-backend-staging.onrender.com" } # ⚠
+
+      - name: production
+        networking:
+          isolation: enabled
+        permissions:
+          protection: enabled
+        databases:
+          - name: ledgerdrop-db
+            databaseName: ledgerdrop
+            user: ledgerdrop
+            region: oregon                # ⚠ confirm data residency
+            plan: basic-1gb               # ⚠ legacy ID; size against traffic
+            ipAllowList: []
+        envVarGroups:
+          - name: ledgerdrop-production
+            envVars:
+              - { key: ENVIRONMENT, value: production }
+              - { key: DEBUG, value: "false" }
+              - { key: LOG_FORMAT, value: json }
+              - { key: CORS_ALLOW_ORIGINS, value: "https://ledgerdrop-frontend.onrender.com" } # ⚠
+              - { key: TRUSTED_HOSTS, value: ledgerdrop-backend.onrender.com } # ⚠
+              - { key: MAX_FILE_SIZE_MB, value: "20" }
+              - { key: MAX_PDF_PAGES, value: "10" }
+              - { key: STORAGE_BACKEND, value: s3 }
+              - { key: S3_BUCKET, value: ledgerdrop-uploads }
+              - { key: S3_REGION, value: auto }
+              - { key: S3_KEY_PREFIX, value: "" }
+              - { key: EXTRACTION_PROVIDER, value: openai }
+              - { key: OPENAI_MODEL, value: gpt-5-mini }
+              - { key: EXTRACTION_PROVIDER_TIMEOUT_SECONDS, value: "60" }
+              - { key: RATE_LIMIT_ENABLED, value: "true" }
+              - { key: RATE_LIMIT_DEFAULT, value: 60/minute } # ⚠
+              - { key: RATE_LIMIT_UPLOAD, value: 10/minute } # ⚠
+        services:
+          - type: web
+            name: ledgerdrop-backend
+            runtime: docker
+            region: oregon
+            plan: standard                # ⚠ legacy ID, still supported
+            numInstances: 1
+            dockerfilePath: backend/Dockerfile
+            dockerContext: backend
+            healthCheckPath: /health
+            autoDeployTrigger: "off"
+            preDeployCommand: alembic upgrade head
+            envVars:
+              - fromGroup: ledgerdrop-production
+              - key: DATABASE_URL
+                fromDatabase: { name: ledgerdrop-db, property: connectionString }
+              - { key: S3_ENDPOINT_URL, sync: false }
+              - { key: S3_ACCESS_KEY_ID, sync: false }
+              - { key: S3_SECRET_ACCESS_KEY, sync: false }
+              - { key: OPENAI_API_KEY, sync: false }
+              - { key: SENTRY_DSN, sync: false }
+          - type: web
+            name: ledgerdrop-frontend
+            runtime: docker
+            region: oregon
+            plan: standard                # ⚠ legacy ID, still supported
+            numInstances: 1
+            dockerfilePath: frontend/Dockerfile
+            dockerContext: frontend
+            healthCheckPath: /
+            autoDeployTrigger: "off"
+            envVars:
+              - { key: NEXT_PUBLIC_API_BASE_URL, value: "https://ledgerdrop-backend.onrender.com" } # ⚠ replace with real domain

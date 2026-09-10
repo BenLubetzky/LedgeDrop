@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError
+from app.core.metrics import observe_stage
 from app.models.normalization import NormalizationAttempt
 from app.models.validation import ValidationAttempt, ValidationStatus
 from app.schemas.validation import InvoiceValidation
@@ -74,11 +75,11 @@ class ValidationService:
 
     async def start(self, normalization_id: uuid.UUID) -> ValidationAttempt:
         """Run the first validation for a ``COMPLETED`` normalization attempt."""
-        return await self._run(normalization_id, action="start")
+        return await observe_stage("validation", self._run(normalization_id, action="start"))
 
     async def retry(self, normalization_id: uuid.UUID) -> ValidationAttempt:
         """Run a fresh attempt for a normalization whose last validation FAILED."""
-        return await self._run(normalization_id, action="retry")
+        return await observe_stage("validation", self._run(normalization_id, action="retry"))
 
     # --- orchestration ------------------------------------------------- --
 

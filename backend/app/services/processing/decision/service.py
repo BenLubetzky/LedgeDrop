@@ -57,6 +57,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError
+from app.core.metrics import observe_stage
 from app.models.decision import DecisionAttempt, DecisionStatus
 from app.models.document import Document
 from app.models.extraction import ExtractionAttempt
@@ -105,20 +106,26 @@ class DecisionService:
         self, validation_id: uuid.UUID, *, manual_review_requested: bool = False
     ) -> DecisionAttempt:
         """Run the first decision for a ``COMPLETED`` validation attempt."""
-        return await self._run(
-            validation_id,
-            action="start",
-            manual_review_requested=manual_review_requested,
+        return await observe_stage(
+            "decision",
+            self._run(
+                validation_id,
+                action="start",
+                manual_review_requested=manual_review_requested,
+            ),
         )
 
     async def retry(
         self, validation_id: uuid.UUID, *, manual_review_requested: bool = False
     ) -> DecisionAttempt:
         """Run a fresh attempt for a validation whose last decision FAILED."""
-        return await self._run(
-            validation_id,
-            action="retry",
-            manual_review_requested=manual_review_requested,
+        return await observe_stage(
+            "decision",
+            self._run(
+                validation_id,
+                action="retry",
+                manual_review_requested=manual_review_requested,
+            ),
         )
 
     # --- orchestration ------------------------------------------------- --

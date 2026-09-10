@@ -16,6 +16,10 @@ dependencies = [
     "anyio>=4.6",
     "pypdf>=5.1",
     "openai>=1.109",
+    "aioboto3>=15.5.0",
+    "slowapi>=0.1.10",
+    "sentry-sdk>=2.69.1",
+    "prometheus-fastapi-instrumentator>=8.1.0",
 ]
 
 [dependency-groups]
@@ -26,6 +30,7 @@ dev = [
     # Alembic's `timezone = UTC` (alembic.ini) needs IANA tz data, which Windows
     # does not ship. Only used when rendering migration timestamps.
     "tzdata>=2024.1",
+    "moto[s3,server]>=5.2.3",
 ]
 
 [tool.uv]

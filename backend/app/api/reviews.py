@@ -31,12 +31,14 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_review_service
 from app.core.errors import NotFoundError
+from app.core.metrics import REVIEW_QUEUE_DEPTH
 from app.models.decision import DecisionAttempt
-from app.models.document import Document
+from app.models.document import Document, DocumentStatus
 from app.schemas.review import InvoiceReview
 from app.schemas.review_api import (
     InvoiceReviewResult,
@@ -119,6 +121,12 @@ async def review_queue(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ReviewQueueEntry]:
     rows = await ReviewRepository(db).queue(limit=limit, offset=offset)
+    depth = await db.scalar(
+        select(func.count()).select_from(Document).where(
+            Document.status == DocumentStatus.NEEDS_REVIEW
+        )
+    )
+    REVIEW_QUEUE_DEPTH.set(depth or 0)
     return [ReviewQueueEntry.from_row(*row) for row in rows]
 
 

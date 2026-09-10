@@ -370,6 +370,9 @@ svg {
 .extraction-header h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.025em; overflow-wrap: anywhere; }
 .panel-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .panel-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 34px;
   border: 1px solid var(--line-dark);
   background: #fff;

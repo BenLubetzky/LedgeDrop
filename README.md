@@ -4,7 +4,16 @@ Business document-processing application. Users upload business documents; the
 system extracts, normalizes, and validates structured data, then accepts the
 result or routes it for human review.
 
-**Current stage: Stage 8 (reviewer corrections) is complete.** Upload,
+**Current stage: Stage 9 (deployment readiness) — implementation complete;
+operational acceptance pending.**
+Container images, `render.yaml` for Render, a Cloudflare R2 storage backend
+behind `FileStorage`, production config with a fail-fast safety check, edge
+hardening, structured logging + `/metrics` + readiness checks, and an operator
+runbook (`docs/stage-9-deployment-readiness.md`, `docs/stage-9-runbook.md`).
+Provisioning the real Render + R2 infrastructure and the deploy rehearsals are
+operator steps.
+
+**Stage 8 (reviewer corrections) is complete.** Upload,
 structured invoice extraction, deterministic normalization, deterministic
 validation, the deterministic decision, and human review (Stages 2–7) are
 complete for English-language PDF invoices. Stage 6 turns a completed
@@ -28,6 +37,9 @@ auto-accepting a clean re-decision or returning it to the review queue. See
 | [frontend/](frontend/) | Next.js + TypeScript interface. See [frontend/README.md](frontend/README.md). |
 | `storage/uploads/` | Local development file storage for uploaded PDFs. |
 | [docker-compose.yml](docker-compose.yml) | Local PostgreSQL for development and tests. |
+| [docker-compose.prod.yml](docker-compose.prod.yml) | Local production-like stack (prod images + MinIO). Verification only. |
+| [render.yaml](render.yaml) | Render Blueprint: staging + production topology (Stage 9). |
+| [docs/stage-9-deployment-readiness.md](docs/stage-9-deployment-readiness.md), [docs/stage-9-runbook.md](docs/stage-9-runbook.md) | Deployment spec and operator runbook. |
 
 ## Requirements
 
@@ -57,6 +69,16 @@ npm run dev
 
 Run each service in its own terminal. The frontend talks to the backend at
 `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`).
+
+## Production-like run (offline)
+
+```bash
+docker compose -f docker-compose.prod.yml up --build
+```
+
+Builds the real backend/frontend images and runs them with PostgreSQL and a
+MinIO S3 backend. For real deployment see
+[docs/stage-9-runbook.md](docs/stage-9-runbook.md).
 
 ## Tests
 

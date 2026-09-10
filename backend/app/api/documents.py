@@ -20,15 +20,17 @@ import uuid
 from collections.abc import Sequence
 from functools import partial
 from typing import Annotated
+from urllib.parse import quote
 
 import anyio
-from fastapi import APIRouter, Depends, File, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Request, Response, UploadFile, status
+from prometheus_client import Counter
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_storage
 from app.core.config import settings
+from app.core.rate_limit import UPLOAD_RATE_LIMIT, limiter
 from app.core.errors import (
     BadRequestError,
     NotFoundError,
@@ -39,13 +41,19 @@ from app.core.errors import (
 from app.models.document import Document, DocumentStatus
 from app.schemas.document import DocumentRead
 from app.services.pdf import NOT_A_PDF, PdfValidationError, inspect_pdf
-from app.services.storage import LocalFileStorage, StorageError
+from app.services.storage import FileStorage, StorageError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 logger = logging.getLogger("app.documents")
 
 _READ_CHUNK = 1024 * 1024  # 1 MiB
 _MAX_ORIGINAL_FILENAME_LENGTH = 512
+
+_uploads_total = Counter(
+    "ledgerdrop_uploads_total",
+    "Document upload attempts by outcome.",
+    ["outcome"],
+)
 
 
 async def _read_within_limit(upload: UploadFile, limit_bytes: int) -> bytes:
@@ -76,10 +84,24 @@ async def _read_within_limit(upload: UploadFile, limit_bytes: int) -> bytes:
     status_code=status.HTTP_201_CREATED,
     summary="Upload and store one PDF",
 )
+@limiter.limit(UPLOAD_RATE_LIMIT)
 async def upload_document(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    storage: Annotated[LocalFileStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
     file: Annotated[UploadFile, File(description="A single PDF file, 20 MB / 10 pages max.")],
+) -> Document:
+    try:
+        document = await _store_upload(db, storage, file)
+    except Exception:
+        _uploads_total.labels(outcome="rejected").inc()
+        raise
+    _uploads_total.labels(outcome="accepted").inc()
+    return document
+
+
+async def _store_upload(
+    db: AsyncSession, storage: FileStorage, file: UploadFile
 ) -> Document:
     filename = (file.filename or "").strip()
     if not filename:
@@ -170,7 +192,7 @@ async def get_document(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Document:
     return await _get_or_404(db, document_id)
-6
+
 
 @router.delete(
     "/{document_id}",
@@ -180,7 +202,7 @@ async def get_document(
 async def delete_document(
     document_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    storage: Annotated[LocalFileStorage, Depends(get_storage)],
+    storage: Annotated[FileStorage, Depends(get_storage)],
 ) -> None:
     document = await _get_or_404(db, document_id)
 
@@ -201,30 +223,51 @@ async def delete_document(
         )
 
 
+def _inline_content_disposition(filename: str) -> str:
+    """Build an ``inline`` Content-Disposition, ASCII-safe with a UTF-8 fallback.
+
+    Never contains a filesystem path - only the original upload filename.
+    """
+    ascii_name = (
+        filename.encode("ascii", "ignore")
+        .decode("ascii")
+        .replace('"', "")
+        .replace("\\", "")
+        .replace("\r", "")
+        .replace("\n", "")
+        .strip()
+    ) or "document.pdf"
+    disposition = f'inline; filename="{ascii_name}"'
+    if ascii_name != filename:
+        disposition += f"; filename*=utf-8''{quote(filename, safe='')}"
+    return disposition
+
+
 @router.get(
     "/{document_id}/file",
     summary="Stream the stored PDF",
-    response_class=FileResponse,
+    response_class=Response,
 )
 async def download_document_file(
     document_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    storage: Annotated[LocalFileStorage, Depends(get_storage)],
-) -> FileResponse:
+    storage: Annotated[FileStorage, Depends(get_storage)],
+) -> Response:
     document = await _get_or_404(db, document_id)
     try:
-        path = await storage.path_for(document.file_location)
+        data = await storage.get_bytes(document.file_location)
     except StorageError as exc:
-        # The record exists but the stored file is missing or unreadable. Do not
-        # leak the resolved path or the underlying reason.
+        # The record exists but the stored object is missing or unreadable. Do
+        # not leak the resolved location or the underlying reason.
         raise NotFoundError(
             "The stored file for this document is unavailable.",
             code="FILE_NOT_FOUND",
         ) from exc
 
-    return FileResponse(
-        path,
+    return Response(
+        content=data,
         media_type="application/pdf",
-        filename=document.original_filename,
-        content_disposition_type="inline",
+        headers={
+            "content-disposition": _inline_content_disposition(document.original_filename)
+        },
     )

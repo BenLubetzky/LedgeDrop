@@ -1,0 +1,30 @@
+# Keep the build context small and secret-free.
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-temp*/
+.pytest-*/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Not needed at runtime.
+tests/
+evaluation/
+.review-temp/
+
+# VCS / editors / OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
