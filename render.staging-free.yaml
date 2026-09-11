@@ -48,12 +48,9 @@ projects:
             dockerContext: backend
             healthCheckPath: /health
             autoDeployTrigger: "off"
-            # Render's separate pre-deploy command requires paid compute. For
-            # free staging, run the idempotent migration before the server.
-            dockerCommand: >-
-              sh -c "alembic upgrade head && exec uvicorn app.main:app --host
-              0.0.0.0 --port ${PORT:-8000} --proxy-headers
-              --forwarded-allow-ips='*'"
+            # Render's separate pre-deploy phase requires paid compute. Keep the
+            # free-plan migration/start sequence in a staging-only script.
+            dockerCommand: sh /app/start-render-free.sh
             envVars:
               - fromGroup: ledgerdrop-staging
               - key: DATABASE_URL
