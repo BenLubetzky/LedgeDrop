@@ -15,7 +15,7 @@ projects:
           - name: ledgerdrop-db-staging
             databaseName: ledgerdrop
             user: ledgerdrop
-            region: oregon
+            region: frankfurt        # free-tier Postgres wasn't available in oregon; keep in sync with the services below
             plan: free
             ipAllowList: []
         envVarGroups:
@@ -42,7 +42,7 @@ projects:
           - type: web
             name: ledgerdrop-backend-staging
             runtime: docker
-            region: oregon
+            region: frankfurt        # must match ledgerdrop-db-staging's region for private networking
             plan: free
             dockerfilePath: backend/Dockerfile
             dockerContext: backend
@@ -63,7 +63,7 @@ projects:
           - type: web
             name: ledgerdrop-frontend-staging
             runtime: docker
-            region: oregon
+            region: frankfurt        # matches ledgerdrop-backend-staging; not strictly required but keeps the environment consistent
             plan: free
             dockerfilePath: frontend/Dockerfile
             dockerContext: frontend
