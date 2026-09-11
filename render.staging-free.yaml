@@ -1,6 +1,6 @@
 # LedgerDrop free staging Blueprint.
 #
-# This deploys staging only. It intentionally uses Render's free compute plans
+# This deploys staging only (frankfurt). It intentionally uses Render's free compute plans
 # for initial evaluation. Free services can sleep when idle, and a free Render
 # Postgres database expires after 30 days. Do not use this Blueprint for
 # production; render.yaml remains the production-like topology.
