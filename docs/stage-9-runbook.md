@@ -22,8 +22,10 @@ For a no-cost initial evaluation, use `render.staging-free.yaml` instead of
 `render.yaml` when creating the Blueprint. It provisions staging only on free
 Render plans and disables paid environment network isolation. Free web services
 sleep when idle, and the free Postgres database expires after 30 days and has no
-backups. This path is for initial testing, not production or the final Stage 9
-operational-acceptance rehearsal.
+backups. Because Render's separate pre-deploy command is paid-only, this
+Blueprint runs the idempotent `alembic upgrade head` migration in the backend's
+startup command. This path is for initial testing, not production or the final
+Stage 9 operational-acceptance rehearsal.
 
 ---
 
