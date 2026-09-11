@@ -1,0 +1,71 @@
+# LedgerDrop free staging Blueprint.
+#
+# This deploys staging only. It intentionally uses Render's free compute plans
+# for initial evaluation. Free services can sleep when idle, and a free Render
+# Postgres database expires after 30 days. Do not use this Blueprint for
+# production; render.yaml remains the production-like topology.
+
+projects:
+  - name: LedgerDrop
+    environments:
+      - name: staging
+        networking:
+          isolation: disabled
+        databases:
+          - name: ledgerdrop-db-staging
+            databaseName: ledgerdrop
+            user: ledgerdrop
+            region: oregon
+            plan: free
+            ipAllowList: []
+        envVarGroups:
+          - name: ledgerdrop-staging
+            envVars:
+              - { key: ENVIRONMENT, value: staging }
+              - { key: DEBUG, value: "false" }
+              - { key: LOG_FORMAT, value: json }
+              - { key: CORS_ALLOW_ORIGINS, value: "https://ledgerdrop-frontend-staging.onrender.com" }
+              - { key: TRUSTED_HOSTS, value: ledgerdrop-backend-staging.onrender.com }
+              - { key: MAX_FILE_SIZE_MB, value: "20" }
+              - { key: MAX_PDF_PAGES, value: "10" }
+              - { key: STORAGE_BACKEND, value: s3 }
+              - { key: S3_BUCKET, value: ledgerdrop-uploads-staging }
+              - { key: S3_REGION, value: auto }
+              - { key: S3_KEY_PREFIX, value: "" }
+              - { key: EXTRACTION_PROVIDER, value: openai }
+              - { key: OPENAI_MODEL, value: gpt-5-mini }
+              - { key: EXTRACTION_PROVIDER_TIMEOUT_SECONDS, value: "60" }
+              - { key: RATE_LIMIT_ENABLED, value: "true" }
+              - { key: RATE_LIMIT_DEFAULT, value: 60/minute }
+              - { key: RATE_LIMIT_UPLOAD, value: 10/minute }
+        services:
+          - type: web
+            name: ledgerdrop-backend-staging
+            runtime: docker
+            region: oregon
+            plan: free
+            dockerfilePath: backend/Dockerfile
+            dockerContext: backend
+            healthCheckPath: /health
+            autoDeployTrigger: "off"
+            preDeployCommand: alembic upgrade head
+            envVars:
+              - fromGroup: ledgerdrop-staging
+              - key: DATABASE_URL
+                fromDatabase: { name: ledgerdrop-db-staging, property: connectionString }
+              - { key: S3_ENDPOINT_URL, sync: false }
+              - { key: S3_ACCESS_KEY_ID, sync: false }
+              - { key: S3_SECRET_ACCESS_KEY, sync: false }
+              - { key: OPENAI_API_KEY, sync: false }
+              - { key: SENTRY_DSN, sync: false }
+          - type: web
+            name: ledgerdrop-frontend-staging
+            runtime: docker
+            region: oregon
+            plan: free
+            dockerfilePath: frontend/Dockerfile
+            dockerContext: frontend
+            healthCheckPath: /
+            autoDeployTrigger: "off"
+            envVars:
+              - { key: NEXT_PUBLIC_API_BASE_URL, value: "https://ledgerdrop-backend-staging.onrender.com" }

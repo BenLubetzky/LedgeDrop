@@ -18,6 +18,13 @@ either that affects a procedure below is part of that change.
 - The environment's secrets to hand: R2 endpoint + access key id + secret,
   OpenAI API key, (optional) Sentry DSN.
 
+For a no-cost initial evaluation, use `render.staging-free.yaml` instead of
+`render.yaml` when creating the Blueprint. It provisions staging only on free
+Render plans and disables paid environment network isolation. Free web services
+sleep when idle, and the free Postgres database expires after 30 days and has no
+backups. This path is for initial testing, not production or the final Stage 9
+operational-acceptance rehearsal.
+
 ---
 
 ## 1. Initial provisioning
