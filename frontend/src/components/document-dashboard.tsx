@@ -131,6 +131,29 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+// fetch() rejects with a TypeError for a network-level failure (DNS, refused
+// connection, dropped connection) as opposed to a non-2xx HTTP response. A
+// free-tier Render instance that has spun down from inactivity can fail the
+// first request this way while it wakes up, even though it goes on to serve
+// the request that woke it — so this class of error is worth a few retries
+// rather than surfacing immediately as "the backend is down".
+function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError;
+}
+
+async function fetchDocumentList(): Promise<DocumentRecord[]> {
+  const response = await fetch(`${API_BASE_URL}/documents`, { cache: "no-store" });
+  const body = await readJson(response);
+  if (!response.ok) {
+    throw new Error(messageFromBody(body, "The document list could not be loaded."));
+  }
+  return body as DocumentRecord[];
+}
+
 function validateFile(file: File): string | null {
   const hasPdfExtension = file.name.toLowerCase().endsWith(".pdf");
   const hasPdfMimeType = file.type === "application/pdf" || file.type === "";
@@ -234,6 +257,7 @@ export function DocumentDashboard() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [isLoadingDocuments, setIsLoadingDocuments] = useState(true);
+  const [isWakingBackend, setIsWakingBackend] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -333,27 +357,35 @@ export function DocumentDashboard() {
 
   const loadDocuments = useCallback(async () => {
     setListError(null);
-    try {
-      const response = await fetch(`${API_BASE_URL}/documents`, {
-        cache: "no-store",
-      });
-      const body = await readJson(response);
-      if (!response.ok) {
-        throw new Error(
-          messageFromBody(body, "The document list could not be loaded."),
-        );
+    setIsWakingBackend(false);
+    // Retry delays absorb a cold free-tier backend waking up (Render warns
+    // this can take 50s+) instead of failing on the first attempt.
+    const retryDelaysMs = [0, 4000, 9000, 15000, 20000];
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
+      if (attempt > 0) {
+        setIsWakingBackend(true);
+        await sleep(retryDelaysMs[attempt]);
       }
-      setDocuments(body as DocumentRecord[]);
-    } catch (error) {
-      setListError(
-        errorMessage(
-          error,
-          "Could not reach LedgerDrop. Make sure the backend is running.",
-        ),
-      );
-    } finally {
-      setIsLoadingDocuments(false);
+      try {
+        const list = await fetchDocumentList();
+        setDocuments(list);
+        setIsWakingBackend(false);
+        setIsLoadingDocuments(false);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isNetworkError(error)) break;
+      }
     }
+    setIsWakingBackend(false);
+    setListError(
+      errorMessage(
+        lastError,
+        "Could not reach LedgerDrop. Make sure the backend is running.",
+      ),
+    );
+    setIsLoadingDocuments(false);
   }, []);
 
   useEffect(() => {
@@ -392,7 +424,27 @@ export function DocumentDashboard() {
       ]);
       setSuccessMessage(`${created.original_filename} was uploaded successfully.`);
     } catch (error) {
-      setUploadError(errorMessage(error, "The PDF could not be uploaded."));
+      // A cold free-tier backend can drop the upload response even though the
+      // document was actually stored server-side. Re-check before reporting
+      // failure, so a false "couldn't reach the backend" error doesn't hide a
+      // successful upload that would otherwise only show up after a manual
+      // refresh.
+      try {
+        const list = await fetchDocumentList();
+        setDocuments(list);
+        const recovered = list.find(
+          (document) =>
+            document.original_filename === file.name &&
+            Date.now() - Date.parse(document.uploaded_at) < 5 * 60 * 1000,
+        );
+        if (recovered) {
+          setSuccessMessage(`${recovered.original_filename} was uploaded successfully.`);
+        } else {
+          setUploadError(errorMessage(error, "The PDF could not be uploaded."));
+        }
+      } catch {
+        setUploadError(errorMessage(error, "The PDF could not be uploaded."));
+      }
     } finally {
       setIsUploading(false);
       setActiveFilename(null);
@@ -637,7 +689,11 @@ export function DocumentDashboard() {
           {!listError && isLoadingDocuments && (
             <div className="list-message" role="status">
               <span className="spinner" aria-hidden="true" />
-              <p>Loading documents…</p>
+              <p>
+                {isWakingBackend
+                  ? "Waking up the server… this can take up to a minute on the free tier."
+                  : "Loading documents…"}
+              </p>
             </div>
           )}
           {!listError && !isLoadingDocuments && documents.length === 0 && (
