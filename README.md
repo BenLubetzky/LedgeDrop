@@ -4,14 +4,17 @@ Business document-processing application. Users upload business documents; the
 system extracts, normalizes, and validates structured data, then accepts the
 result or routes it for human review.
 
-**Current stage: Stage 9 (deployment readiness) — implementation complete;
-operational acceptance pending.**
+**Project status: closed after Stage 9.** The invoice MVP and Stage 9
+deployment-readiness implementation are complete. No Stage 10 is planned.
 Container images, `render.yaml` for Render, a Cloudflare R2 storage backend
 behind `FileStorage`, production config with a fail-fast safety check, edge
 hardening, structured logging + `/metrics` + readiness checks, and an operator
 runbook (`docs/stage-9-deployment-readiness.md`, `docs/stage-9-runbook.md`).
-Provisioning the real Render + R2 infrastructure and the deploy rehearsals are
-operator steps.
+Live Render + R2 operational acceptance is not evidenced in this repository;
+the release, rollback, backup-restore, and alert rehearsals remain governed by
+the [Stage 9 acceptance gate](docs/stage-9-deployment-readiness.md). See the
+[project handoff](docs/project-handoff.md) before resuming development or
+operating a production deployment.
 
 **Stage 8 (reviewer corrections) is complete.** Upload,
 structured invoice extraction, deterministic normalization, deterministic

@@ -4,9 +4,10 @@
 file holds the deployment boundary, the pinned platform baseline, the concrete
 per-package design, the completion gate, and the verification map.
 
-**Status.** All in-repo work for Packages 1–9 is done; what remains is
-**operator execution against live infrastructure** (a Render account + R2), which
-this repo cannot perform.
+**Status.** All in-repo work for Packages 1–9 is done, and the owner closed the
+project after Stage 9. This repository has no completed record for the live
+operational-acceptance gate below. Its infrastructure checks still require
+operator evidence before a production deployment can be called accepted.
 
 | Pkg | In-repo deliverable | State |
 |---|---|---|

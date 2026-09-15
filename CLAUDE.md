@@ -13,6 +13,10 @@ document types unless they directly help the invoice MVP.
 
 ## Current project state
 
+**Project closed after Stage 9.** No Stage 10 is planned. See
+`docs/project-handoff.md` for the working scope, restart path, and operational
+acceptance evidence boundary.
+
 **Stage 2 (upload foundation): complete.** FastAPI backend with environment
 config, async PostgreSQL, SQLAlchemy, Alembic, consistent API errors, health
 endpoints, and local file storage. Endpoints `POST /documents`, `GET /documents`,
@@ -186,12 +190,13 @@ the auto-accept/return-to-review resolution only. Line-item re-ordering (as
 distinct from add/remove + edit), notifications, reviewer assignment,
 authentication, and downstream posting remain later-stage work.
 
-## Stage 9 (deployment readiness and MVP hardening): operational acceptance pending
+## Stage 9 (deployment readiness and MVP hardening): in-repo work complete
 
-**Status: the Packages 1–9 implementation is present; what remains is
-operator execution against live infrastructure (a Render account + Cloudflare
-R2) — provisioning, the local→R2 data cutover, a tested backup restore, and the
-release + rollback rehearsals.** Stage 9 adds **no** document-processing
+**Status: the Packages 1–9 implementation is present.** The owner closed the
+project after this stage. Live operational acceptance is not recorded in this
+repository; provisioning, any local→R2 data cutover, a tested backup restore,
+and release + rollback rehearsals require recorded operator evidence before
+claiming the Stage 9 deployment gate passed. Stage 9 adds **no** document-processing
 feature, changes **no** Stage 2–8 API/schema/lifecycle contract, and adds
 **no** authentication. Full spec, per-package status, completion gate,
 verification map, and the ⚠ provisional-values register:
@@ -416,8 +421,8 @@ human approval/rejection, and audit trail are implemented in Stage 7. Editable
 field corrections with re-projection, re-validation, re-decision, and the
 auto-accept / return-to-review resolution are Stage 8 (complete). Deployment
 readiness, durable production storage, operational security, observability,
-recovery, and release verification are Stage 9 (implementation complete;
-operator execution against live Render + R2 infrastructure remains).
+recovery, and release verification are Stage 9 (in-repo implementation
+complete; live operational acceptance is not recorded here).
 
 ## Implementation conduct
 
